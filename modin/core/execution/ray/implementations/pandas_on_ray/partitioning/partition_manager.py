@@ -15,6 +15,7 @@
 
 import inspect
 import threading
+import numpy as np
 
 import ray
 
@@ -91,6 +92,43 @@ class PandasOnRayDataframePartitionManager(GenericRayDataframePartitionManager):
     _partition_class = PandasOnRayDataframePartition
     _column_partitions_class = PandasOnRayDataframeColumnPartition
     _row_partition_class = PandasOnRayDataframeRowPartition
+
+    @classmethod
+    def get_new_indices_by_partition_type(cls, axis, partitions, index_func=None):
+        # All partitions must be of the same type, else something is wrong
+        assert (all(isinstance(o, cls._column_partitions_class) for o in partitions.flatten())\
+                or all(isinstance(o, cls._row_partition_class) for o in partitions.flatten())\
+                or all(isinstance(o, cls._partition_class) for o in partitions.flatten()))
+
+        # With the new axis partitioning logic, we should not be creating 2D partition
+        # frames of n*m (n > 1, m > 1)
+        assert (1 in partitions.shape)
+
+        func = cls.preprocess_func(index_func)
+        grid_of_blocks = []
+
+        if isinstance(partitions[0][0], cls._partition_class):
+            grid_of_blocks = partitions
+        else:
+            for row in partitions:
+                for col in row:
+                    grid_of_blocks.append(col.list_of_partitions_to_combine)
+
+        if isinstance(partitions[0][0], cls._column_partitions_class):
+            grid_of_blocks = np.array(np.transpose(grid_of_blocks))
+        elif isinstance(partitions[0][0], cls._row_partition_class):
+            grid_of_blocks = np.array(grid_of_blocks)
+
+        if axis == 0:
+            return (
+                [idx.apply(func) for idx in grid_of_blocks.T[0]]
+                if len(grid_of_blocks.T)
+                else []
+            )
+        else:
+            return (
+                [idx.apply(func) for idx in grid_of_blocks[0]] if len(grid_of_blocks) else []
+            )
 
     @classmethod
     def get_objects_from_partitions(cls, partitions):

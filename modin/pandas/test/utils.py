@@ -779,7 +779,6 @@ def eval_io(
     raising_exceptions=io_ops_bad_exc,
     check_kwargs_callable=True,
     modin_warning=None,
-    modin_warning_str_match=None,
     md_extra_kwargs=None,
     *args,
     **kwargs,
@@ -805,8 +804,6 @@ def eval_io(
         `check_exception_type` passed as `True`).
     modin_warning: obj
         Warning that should be raised by Modin.
-    modin_warning_str_match: str
-        If `modin_warning` is set, checks that the raised warning matches this string.
     md_extra_kwargs: dict
         Modin operation specific kwargs.
     """
@@ -831,9 +828,8 @@ def eval_io(
             **kwargs,
         )
 
-    warn_match = modin_warning_str_match if modin_warning is not None else None
     if modin_warning:
-        with pytest.warns(modin_warning, match=warn_match):
+        with pytest.warns(modin_warning):
             call_eval_general()
     else:
         call_eval_general()

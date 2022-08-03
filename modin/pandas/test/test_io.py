@@ -13,7 +13,6 @@
 
 import pytest
 import numpy as np
-from packaging import version
 import pandas
 from pandas.errors import ParserWarning
 import pandas._libs.lib as lib
@@ -34,7 +33,6 @@ from modin.config import (
     TestReadFromSqlServer,
     ReadSqlEngine,
 )
-from modin._compat import PandasCompatVersion
 from modin.utils import to_pandas
 from modin.pandas.utils import from_arrow
 from modin.test.test_utils import warns_that_defaulting_to_pandas
@@ -46,7 +44,6 @@ import shutil
 import sqlalchemy as sa
 import csv
 import tempfile
-from typing import Dict
 
 from .utils import (
     check_file_leaks,
@@ -200,22 +197,6 @@ def eval_to_file(modin_obj, pandas_obj, fn, extension, **fn_kwargs):
         assert assert_files_eq(unique_filename_modin, unique_filename_pandas)
     finally:
         teardown_test_files([unique_filename_modin, unique_filename_pandas])
-
-
-@pytest.fixture
-def make_parquet_dir():
-    with tempfile.TemporaryDirectory() as tmp_dir:
-
-        def _make_parquet_dir(
-            dfs_by_filename: Dict[str, pandas.DataFrame], row_group_size: int
-        ):
-            for filename, df in dfs_by_filename.items():
-                df.to_parquet(
-                    os.path.join(tmp_dir, filename), row_group_size=row_group_size
-                )
-            return tmp_dir
-
-        yield _make_parquet_dir
 
 
 @pytest.mark.usefixtures("TestReadCSVFixture")
@@ -623,13 +604,6 @@ class TestCsv:
     @pytest.mark.parametrize("encoding", [None, "latin8", "utf16"])
     @pytest.mark.parametrize("engine", [None, "python", "c"])
     def test_read_csv_compression(self, make_csv_file, compression, encoding, engine):
-        if (
-            compression == "zip"
-            and PandasCompatVersion.CURRENT == PandasCompatVersion.PY36
-        ):
-            pytest.xfail(
-                "Parallel read_csv does not support compression with older pandas"
-            )
         unique_filename = get_unique_filename()
         make_csv_file(
             filename=unique_filename, encoding=encoding, compression=compression
@@ -791,10 +765,6 @@ class TestCsv:
     @pytest.mark.parametrize("warn_bad_lines", [True, False, None])
     @pytest.mark.parametrize("error_bad_lines", [True, False, None])
     @pytest.mark.parametrize("on_bad_lines", ["error", "warn", "skip", None])
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="In compat mode, some error handling tests are failing due to https://github.com/modin-project/modin/issues/2845",
-    )
     def test_read_csv_error_handling(
         self,
         warn_bad_lines,
@@ -818,11 +788,7 @@ class TestCsv:
             filepath_or_buffer=pytest.csvs_names["test_read_csv_bad_lines"],
             warn_bad_lines=warn_bad_lines,
             error_bad_lines=error_bad_lines,
-            **(
-                {}
-                if PandasCompatVersion.CURRENT == PandasCompatVersion.PY36
-                else dict(on_bad_lines=on_bad_lines)
-            ),
+            on_bad_lines=on_bad_lines,
         )
 
     # Internal parameters tests
@@ -959,17 +925,9 @@ class TestCsv:
             index_col=index_col,
             parse_dates=parse_dates,
             encoding=encoding,
-            **(
-                {}
-                if PandasCompatVersion.CURRENT == PandasCompatVersion.PY36
-                else dict(encoding_errors=encoding_errors)
-            ),
+            encoding_errors=encoding_errors,
         )
 
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="storage_options not supported for older pandas",
-    )
     @pytest.mark.parametrize(
         "storage_options",
         [{"anon": False}, {"anon": True}, {"key": "123", "secret": "123"}, None],
@@ -980,19 +938,6 @@ class TestCsv:
             # read_csv kwargs
             filepath_or_buffer="s3://noaa-ghcn-pds/csv/1788.csv",
             storage_options=storage_options,
-        )
-
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="storage_options not supported for older pandas",
-    )
-    def test_read_csv_s3_issue4658(self):
-        eval_io(
-            fn_name="read_csv",
-            # read_csv kwargs
-            filepath_or_buffer="s3://dask-data/nyc-taxi/2015/yellow_tripdata_2015-01.csv",
-            nrows=10,
-            storage_options={"anon": True},
         )
 
     @pytest.mark.parametrize("names", [list("XYZ"), None])
@@ -1013,21 +958,12 @@ class TestCsv:
             skiprows=skiprows,
         )
 
-    def _has_pandas_fallback_reason(self):
-        # The Python engine does not use custom IO dispatchers, so specialized error messages
-        # won't appear
-        return Engine.get() != "Python" and StorageFormat.get() != "Omnisci"
-
     @pytest.mark.xfail(
         condition="config.getoption('--simulate-cloud').lower() != 'off'",
         reason="The reason of tests fail in `cloud` mode is unknown for now - issue #2340",
     )
     def test_read_csv_default_to_pandas(self):
-        if self._has_pandas_fallback_reason():
-            warning_suffix = "buffers"
-        else:
-            warning_suffix = ""
-        with warns_that_defaulting_to_pandas(suffix=warning_suffix):
+        with warns_that_defaulting_to_pandas():
             # This tests that we default to pandas on a buffer
             from io import StringIO
 
@@ -1041,14 +977,9 @@ class TestCsv:
     )
     def test_read_csv_default_to_pandas_url(self):
         # We haven't implemented read_csv from https, but if it's implemented, then this needs to change
-        if self._has_pandas_fallback_reason():
-            warning_match = "No such file"
-        else:
-            warning_match = ""
         eval_io(
             fn_name="read_csv",
             modin_warning=UserWarning,
-            modin_warning_str_match=warning_match,
             # read_csv kwargs
             filepath_or_buffer="https://raw.githubusercontent.com/modin-project/modin/master/modin/pandas/test/data/blah.csv",
             # It takes about ~17Gb of RAM for Omnisci to import the whole table from this test
@@ -1140,8 +1071,6 @@ class TestCsv:
         reason="The reason of tests fail in `cloud` mode is unknown for now - issue #2340",
     )
     def test_to_csv(self, header, mode):
-        if "b" in mode and PandasCompatVersion.CURRENT == PandasCompatVersion.PY36:
-            pytest.xfail(reason="older pandas does not support to_csv with binary mode")
 
         pandas_df = generate_dataframe()
         modin_df = pd.DataFrame(pandas_df)
@@ -1351,14 +1280,13 @@ class TestTable:
 
 class TestParquet:
     @pytest.mark.parametrize("columns", [None, ["col1"]])
-    @pytest.mark.parametrize("row_group_size", [None, 100, 1000, 10_000])
     @pytest.mark.xfail(
         condition="config.getoption('--simulate-cloud').lower() != 'off'",
         reason="The reason of tests fail in `cloud` mode is unknown for now - issue #3264",
     )
-    def test_read_parquet(self, make_parquet_file, columns, row_group_size):
+    def test_read_parquet(self, make_parquet_file, columns):
         unique_filename = get_unique_filename(extension="parquet")
-        make_parquet_file(filename=unique_filename, row_group_size=row_group_size)
+        make_parquet_file(filename=unique_filename)
 
         eval_io(
             fn_name="read_parquet",
@@ -1387,33 +1315,18 @@ class TestParquet:
             parquet_df[col]
 
     @pytest.mark.parametrize("columns", [None, ["col1"]])
-    @pytest.mark.parametrize("row_group_size", [None, 100, 1000, 10_000])
-    @pytest.mark.parametrize(
-        "rows_per_file", [[1000] * 40, [0, 0, 40_000], [10_000, 10_000] + [100] * 200]
-    )
     @pytest.mark.xfail(
         condition="config.getoption('--simulate-cloud').lower() != 'off'",
         reason="The reason of tests fail in `cloud` mode is unknown for now - issue #3264",
     )
-    def test_read_parquet_directory(
-        self, make_parquet_dir, columns, row_group_size, rows_per_file
-    ):
-        num_cols = DATASET_SIZE_DICT.get(
-            TestDatasetSize.get(), DATASET_SIZE_DICT["Small"]
-        )
-        dfs_by_filename = {}
-        start_row = 0
-        for i, length in enumerate(rows_per_file):
-            end_row = start_row + length
-            dfs_by_filename[f"{i}.parquet"] = pandas.DataFrame(
-                {f"col{x + 1}": np.arange(start_row, end_row) for x in range(num_cols)}
-            )
-            start_row = end_row
-        path = make_parquet_dir(dfs_by_filename, row_group_size)
+    def test_read_parquet_directory(self, make_parquet_file, columns):  #
+
+        unique_filename = get_unique_filename(extension=None)
+        make_parquet_file(filename=unique_filename, directory=True)
         eval_io(
             fn_name="read_parquet",
             # read_parquet kwargs
-            path=path,
+            path=unique_filename,
             columns=columns,
         )
 
@@ -1443,36 +1356,17 @@ class TestParquet:
         pandas_df = pandas.DataFrame(
             {
                 "idx": np.random.randint(0, 100_000, size=2000),
-                "idx_categorical": pandas.Categorical(["y", "z"] * 1000),
-                # Can't do interval index right now because of this bug fix that is planned
-                # to be apart of the pandas 1.5.0 release: https://github.com/pandas-dev/pandas/pull/46034
-                # "idx_interval": pandas.interval_range(start=0, end=2000),
-                "idx_datetime": pandas.date_range(start="1/1/2018", periods=2000),
-                "idx_periodrange": pandas.period_range(
-                    start="2017-01-01", periods=2000
-                ),
                 "A": np.random.randint(0, 100_000, size=2000),
                 "B": ["a", "b"] * 1000,
                 "C": ["c"] * 2000,
             }
         )
-        # Older versions of pyarrow do not support Arrow to Parquet
-        # schema conversion for duration[ns]
-        # https://issues.apache.org/jira/browse/ARROW-6780
-        if version.parse(pa.__version__) >= version.parse("8.0.0"):
-            pandas_df["idx_timedelta"] = pandas.timedelta_range(
-                start="1 day", periods=2000
-            )
-
         try:
-            for col in pandas_df.columns:
-                if col.startswith("idx"):
-                    pandas_df.set_index(col).to_parquet(unique_filename)
-                    # read the same parquet using modin.pandas
-                    df_equals(
-                        pd.read_parquet(unique_filename),
-                        pandas.read_parquet(unique_filename),
-                    )
+            pandas_df.set_index("idx").to_parquet(unique_filename)
+            # read the same parquet using modin.pandas
+            df_equals(
+                pd.read_parquet(unique_filename), pandas.read_parquet(unique_filename)
+            )
 
             pandas_df.set_index(["idx", "A"]).to_parquet(unique_filename)
             df_equals(
@@ -1530,10 +1424,6 @@ class TestParquet:
             with fs.open(dataset_url, "rb") as file_obj:
                 eval_io("read_parquet", path=file_obj)
         else:
-            if PandasCompatVersion.CURRENT == PandasCompatVersion.PY36:
-                pytest.xfail(
-                    reason="older pandas.read_parquet does not support storage_options"
-                )
             eval_io("read_parquet", path=dataset_url, storage_options={"anon": True})
 
     @pytest.mark.xfail(
@@ -1614,10 +1504,6 @@ class TestJson:
             lines=lines,
         )
 
-    @pytest.mark.skipif(
-        condition=PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_json does not support storage_options",
-    )
     @pytest.mark.parametrize(
         "storage_options",
         [{"anon": False}, {"anon": True}, {"key": "123", "secret": "123"}, None],
@@ -1739,10 +1625,6 @@ class TestExcel:
         )
 
     @check_file_leaks
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_excel cannot read .xslx",
-    )
     @pytest.mark.xfail(
         condition="config.getoption('--simulate-cloud').lower() != 'off'",
         reason="The reason of tests fail in `cloud` mode is unknown for now - issue #3264",
@@ -1765,10 +1647,6 @@ class TestExcel:
         reason="pandas throws the exception. See pandas issue #39250 for more info",
     )
     @check_file_leaks
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_excel cannot read .xslx",
-    )
     def test_read_excel_sheetname_title(self):
         eval_io(
             fn_name="read_excel",
@@ -1777,10 +1655,6 @@ class TestExcel:
         )
 
     @check_file_leaks
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_excel cannot read .xslx",
-    )
     def test_excel_empty_line(self):
         path = "modin/pandas/test/data/test_emptyline.xlsx"
         modin_df = pd.read_excel(path)
@@ -1836,10 +1710,6 @@ class TestExcel:
         condition="config.getoption('--simulate-cloud').lower() != 'off'",
         reason="TypeError: Expected list, got type - issue #3284",
     )
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_excel cannot read .xslx",
-    )
     def test_ExcelFile(self, make_excel_file):
         unique_filename = make_excel_file()
 
@@ -1875,9 +1745,7 @@ class TestExcel:
             teardown_test_files([unique_filename_modin, unique_filename_pandas])
 
     @pytest.mark.xfail(
-        Engine.get() != "Python"
-        and PandasCompatVersion.CURRENT != PandasCompatVersion.PY36,
-        reason="Test fails because of issue 3305",
+        Engine.get() != "Python", reason="Test fails because of issue 3305"
     )
     @check_file_leaks
     @pytest.mark.xfail(
@@ -2232,13 +2100,6 @@ class TestFwf:
 
     @pytest.mark.parametrize("nrows", [13, None])
     def test_fwf_file_skiprows(self, make_fwf_file, nrows):
-        if (
-            nrows is not None
-            and PandasCompatVersion.CURRENT == PandasCompatVersion.PY36
-        ):
-            pytest.xfail(
-                "older pandas read_fwf had a bug with list of skiprows and non-None nrows: pandas-dev#10261"
-            )
         unique_filename = make_fwf_file()
 
         eval_io(
@@ -2405,10 +2266,6 @@ class TestFeather:
     @pytest.mark.parametrize(
         "storage_options",
         [{"anon": False}, {"anon": True}, {"key": "123", "secret": "123"}, None],
-    )
-    @pytest.mark.skipif(
-        PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
-        reason="older pandas read_feather does not support storage_options",
     )
     def test_read_feather_s3(self, storage_options):
         eval_io(

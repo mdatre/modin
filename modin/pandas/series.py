@@ -23,6 +23,8 @@ from pandas.core.dtypes.common import (
 )
 from pandas._libs.lib import no_default
 from pandas._typing import IndexKeyFunc
+
+import sys
 from typing import Union, Optional
 import warnings
 
@@ -33,13 +35,12 @@ from .iterator import PartitionIterator
 from .utils import from_pandas, is_scalar, _doc_binary_op
 from .accessor import CachedAccessor, SparseAccessor
 from . import _update_engine
-from modin._compat.pandas_api.classes import SeriesCompat
 
 
 @_inherit_docstrings(
     pandas.Series, excluded=[pandas.Series.__init__], apilink="pandas.Series"
 )
-class Series(SeriesCompat, BasePandasDataset):
+class Series(BasePandasDataset):
     """
     Modin distributed representation of `pandas.Series`.
 
@@ -70,7 +71,6 @@ class Series(SeriesCompat, BasePandasDataset):
     """
 
     _pandas_class = pandas.Series
-    __array_priority__ = pandas.Series.__array_priority__
 
     def __init__(
         self,
@@ -186,6 +186,34 @@ class Series(SeriesCompat, BasePandasDataset):
         Return the values as a NumPy array.
         """
         return super(Series, self).__array__(dtype).flatten()
+
+    @property
+    def __array_priority__(self):  # pragma: no cover
+        """
+        Return pandas `__array_priority__` Series internal parameter.
+
+        Returns
+        -------
+        int
+            Internal pandas parameter ``__array_priority__`` used during interaction with NumPy.
+        """
+        return self._to_pandas().__array_priority__
+
+    # FIXME: __bytes__ was removed in newer pandas versions, so Modin
+    # can remove it too.
+    def __bytes__(self):
+        """
+        Return bytes representation of the Series.
+
+        Returns
+        -------
+        bytes
+
+        Notes
+        -----
+        Method is deprecated.
+        """
+        return self._default_to_pandas(pandas.Series.__bytes__)
 
     def __contains__(self, key):
         """
@@ -591,7 +619,9 @@ class Series(SeriesCompat, BasePandasDataset):
 
     agg = aggregate
 
-    def _apply(self, func, convert_dtype, args, **kwargs):  # noqa: PR01, RT01, D200
+    def apply(
+        self, func, convert_dtype=True, args=(), **kwargs
+    ):  # noqa: PR01, RT01, D200
         """
         Invoke function on values of Series.
         """
@@ -626,19 +656,7 @@ class Series(SeriesCompat, BasePandasDataset):
             or is_list_like(func)
             or return_type not in ["DataFrame", "Series"]
         ):
-            # use the explicit non-Compat parent to avoid infinite recursion
-            result = BasePandasDataset._apply(
-                self,
-                func,
-                axis=0,
-                broadcast=None,
-                raw=False,
-                reduce=None,
-                result_type=None,
-                convert_dtype=convert_dtype,
-                args=args,
-                **kwargs,
-            )
+            result = super(Series, self).apply(func, *args, **kwargs)
         else:
             # handle ufuncs and lambdas
             if kwargs or args and not isinstance(func, np.ufunc):
@@ -660,7 +678,9 @@ class Series(SeriesCompat, BasePandasDataset):
             else:
                 return result
         else:
-            result = globals()[return_type](query_compiler=result)
+            result = getattr(sys.modules[self.__module__], return_type)(
+                query_compiler=result
+            )
             if result.name == self.index[0]:
                 result.name = None
             return result
@@ -697,7 +717,7 @@ class Series(SeriesCompat, BasePandasDataset):
         """
         return self.corr(self.shift(lag))
 
-    def _between(self, left, right, inclusive):  # noqa: PR01, RT01, D200
+    def between(self, left, right, inclusive="both"):  # noqa: PR01, RT01, D200
         """
         Return boolean Series equivalent to left <= series <= right.
         """
@@ -1105,6 +1125,26 @@ class Series(SeriesCompat, BasePandasDataset):
             skipna = True
         return super(Series, self).idxmin(axis=axis, skipna=skipna, *args, **kwargs)
 
+    def info(
+        self,
+        verbose: "bool | None" = None,
+        buf: "IO[str] | None" = None,
+        max_cols: "int | None" = None,
+        memory_usage: "bool | str | None" = None,
+        show_counts: "bool" = True,
+    ):  # noqa: PR01, RT01, D200
+        """
+        Print a concise summary of a Series.
+        """
+        return self._default_to_pandas(
+            pandas.Series.info,
+            verbose=verbose,
+            buf=buf,
+            max_cols=max_cols,
+            memory_usage=memory_usage,
+            show_counts=show_counts,
+        )
+
     def interpolate(
         self,
         method="linear",
@@ -1161,12 +1201,12 @@ class Series(SeriesCompat, BasePandasDataset):
         """
         return self.index
 
-    def _kurt(
+    def kurt(
         self,
-        axis,
-        skipna,
-        level,
-        numeric_only,
+        axis: "Axis | None | NoDefault" = no_default,
+        skipna=True,
+        level=None,
+        numeric_only=None,
         **kwargs,
     ):  # noqa: PR01, RT01, D200
         """
@@ -1175,9 +1215,9 @@ class Series(SeriesCompat, BasePandasDataset):
         axis = self._get_axis_number(axis)
         if numeric_only is True:
             raise NotImplementedError("Series.kurt does not implement numeric_only.")
-        return super(Series, self)._kurt(axis, skipna, level, numeric_only, **kwargs)
+        return super(Series, self).kurt(axis, skipna, level, numeric_only, **kwargs)
 
-    kurtosis = SeriesCompat.kurt
+    kurtosis = kurt
 
     def le(self, other, level=None, fill_value=None, axis=0):  # noqa: PR01, RT01, D200
         """
@@ -1211,16 +1251,15 @@ class Series(SeriesCompat, BasePandasDataset):
             )
         )
 
-    @_inherit_docstrings(pandas.Series.mask, apilink="pandas.Series.mask")
-    def _mask(
+    def mask(
         self,
         cond,
-        other,
-        inplace,
-        axis,
-        level,
-        errors,
-        try_cast,
+        other=np.nan,
+        inplace=False,
+        axis=None,
+        level=None,
+        errors=no_default,
+        try_cast=no_default,
     ):
         return self._default_to_pandas(
             pandas.Series.mask,
@@ -1377,17 +1416,20 @@ class Series(SeriesCompat, BasePandasDataset):
             new_other, level=level, fill_value=None, axis=axis
         )
 
-    @_inherit_docstrings(pandas.Series.prod, apilink="pandas.Series.prod")
-    def _prod(
+    def prod(
         self,
-        axis,
-        skipna,
-        level,
-        numeric_only,
-        min_count,
+        axis=None,
+        skipna=True,
+        level=None,
+        numeric_only=None,
+        min_count=0,
         **kwargs,
-    ):
+    ):  # noqa: PR01, RT01, D200
+        """
+        Return the product of the values over the requested `axis`.
+        """
         axis = self._get_axis_number(axis)
+        validate_bool_kwarg(skipna, "skipna", none_allowed=False)
         if level is not None:
             if (
                 not self._query_compiler.has_multiindex(axis=axis)
@@ -1430,7 +1472,7 @@ class Series(SeriesCompat, BasePandasDataset):
             )
         )
 
-    product = SeriesCompat.prod
+    product = prod
     radd = add
 
     def ravel(self, order="C"):  # noqa: PR01, RT01, D200
@@ -1443,8 +1485,10 @@ class Series(SeriesCompat, BasePandasDataset):
 
         return data
 
-    @_inherit_docstrings(pandas.Series.reindex, apilink="pandas.Series.reindex")
-    def _reindex(self, *args, **kwargs):
+    def reindex(self, *args, **kwargs):  # noqa: PR01, RT01, D200
+        """
+        Conform Series to new index with optional filling logic.
+        """
         if args:
             if len(args) > 1:
                 raise TypeError("Only one positional argument ('index') is allowed")
@@ -1465,9 +1509,8 @@ class Series(SeriesCompat, BasePandasDataset):
                 "reindex() got an unexpected keyword "
                 + f'argument "{list(kwargs.keys())[0]}"'
             )
-        return super(Series, self)._reindex(
+        return super(Series, self).reindex(
             index=index,
-            columns=None,
             method=method,
             level=level,
             copy=copy,
@@ -1517,7 +1560,9 @@ class Series(SeriesCompat, BasePandasDataset):
 
         return self.__constructor__(query_compiler=self._query_compiler.repeat(repeats))
 
-    def _reset_index(self, level, drop, name, inplace):  # noqa: PR01, RT01, D200
+    def reset_index(
+        self, level=None, drop=False, name=no_default, inplace=False
+    ):  # noqa: PR01, RT01, D200
         """
         Generate a new Series with the index reset.
         """
@@ -1626,14 +1671,14 @@ class Series(SeriesCompat, BasePandasDataset):
         """
         return super(Series, self).reorder_levels(order)
 
-    def _replace(
+    def replace(
         self,
-        to_replace,
-        value,
-        inplace,
-        limit,
-        regex,
-        method,
+        to_replace=None,
+        value=no_default,
+        inplace=False,
+        limit=None,
+        regex=False,
+        method: "str | NoDefault" = no_default,
     ):  # noqa: PR01, RT01, D200
         """
         Replace values given in `to_replace` with `value`.
@@ -1743,19 +1788,20 @@ class Series(SeriesCompat, BasePandasDataset):
 
     subtract = sub
 
-    def _sum(
+    def sum(
         self,
-        axis,
-        skipna,
-        level,
-        numeric_only,
-        min_count,
+        axis=None,
+        skipna=True,
+        level=None,
+        numeric_only=None,
+        min_count=0,
         **kwargs,
     ):  # noqa: PR01, RT01, D200
         """
         Return the sum of the values.
         """
         axis = self._get_axis_number(axis)
+        validate_bool_kwarg(skipna, "skipna", none_allowed=False)
         if numeric_only is True:
             raise NotImplementedError("Series.sum does not implement numeric_only")
         if level is not None:
@@ -1817,7 +1863,9 @@ class Series(SeriesCompat, BasePandasDataset):
         """
         return self._default_to_pandas("to_dict", into=into)
 
-    def _to_frame(self, name: "Hashable") -> "DataFrame":  # noqa: PR01, RT01, D200
+    def to_frame(
+        self, name: "Hashable" = no_default
+    ) -> "DataFrame":  # noqa: PR01, RT01, D200
         """
         Convert Series to {label -> value} dict or dict-like object.
         """
@@ -1949,8 +1997,8 @@ class Series(SeriesCompat, BasePandasDataset):
         query_compiler = self._query_compiler.series_update(other._query_compiler)
         self._update_inplace(new_query_compiler=query_compiler)
 
-    def _value_counts(
-        self, normalize, sort, ascending, bins, dropna
+    def value_counts(
+        self, normalize=False, sort=True, ascending=False, bins=None, dropna=True
     ):  # noqa: PR01, RT01, D200
         """
         Return a Series containing counts of unique values.
@@ -1967,7 +2015,7 @@ class Series(SeriesCompat, BasePandasDataset):
                 bins=bins,
                 dropna=dropna,
             )
-        counted_values = super(Series, self)._value_counts(
+        counted_values = super(Series, self).value_counts(
             subset=self,
             normalize=normalize,
             sort=sort,
@@ -1986,15 +2034,15 @@ class Series(SeriesCompat, BasePandasDataset):
             query_compiler=self._query_compiler.series_view(dtype=dtype)
         )
 
-    def _where(
+    def where(
         self,
         cond,
-        other,
-        inplace,
-        axis,
-        level,
-        errors,
-        try_cast,
+        other=no_default,
+        inplace=False,
+        axis=None,
+        level=None,
+        errors=no_default,
+        try_cast=no_default,
     ):  # noqa: PR01, RT01, D200
         """
         Replace values where the condition is False.
@@ -2366,9 +2414,8 @@ class Series(SeriesCompat, BasePandasDataset):
             Prepared `other`.
         """
         if isinstance(other, Series):
-            # NB: deep=False is important for performance bc it retains obj.index._id
-            new_self = self.copy(deep=False)
-            new_other = other.copy(deep=False)
+            new_self = self.copy()
+            new_other = other.copy()
             if self.name == other.name:
                 new_self.name = new_other.name = self.name
             else:

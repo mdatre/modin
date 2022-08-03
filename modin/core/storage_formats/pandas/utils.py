@@ -14,21 +14,8 @@
 """Contains utility functions for frame partitioning."""
 
 from modin.config import MinPartitionSize
-import contextlib
 import numpy as np
 import pandas
-
-
-@contextlib.contextmanager
-def _nullcontext(dummy_value=None):  # noqa: PR01
-    """
-    Act as a replacement for contextlib.nullcontext missing in older Python.
-
-    Notes
-    -----
-    contextlib.nullcontext is only available from Python 3.7.
-    """
-    yield dummy_value
 
 
 def compute_chunksize(axis_len, num_splits, min_block_size=None):
@@ -63,6 +50,20 @@ def compute_chunksize(axis_len, num_splits, min_block_size=None):
     # chunksize shouldn't be less than `min_block_size` to avoid a
     # large amount of small partitions.
     return max(chunksize, min_block_size)
+
+
+def split_axis_partition(df, num_splits, split_axis):
+    chunksize = compute_chunksize(df.shape[1 if split_axis==0 else 0], num_splits)
+    if split_axis == 1:
+        return [
+            df.iloc[chunksize * i : chunksize * (i + 1)]
+            for i in range(num_splits)
+        ]
+    else:
+        return [
+            df.iloc[:, chunksize * i : chunksize * (i + 1)]
+            for i in range(num_splits)
+        ]
 
 
 def split_result_of_axis_func_pandas(axis, num_splits, result, length_list=None):

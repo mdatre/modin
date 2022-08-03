@@ -14,28 +14,13 @@
 import pandas
 import warnings
 
-from modin._compat import PandasCompatVersion
+__pandas_version__ = "1.4.3"
 
-if PandasCompatVersion.CURRENT == PandasCompatVersion.PY36:
-    __pandas_version__ = "1.1.5"
-
-    if pandas.__version__ != __pandas_version__:
-        warnings.warn(
-            f"The pandas version installed {pandas.__version__} does not match the supported pandas version in"
-            + f" Modin {__pandas_version__} compatibility mode. This may cause undesired side effects!"
-        )
-    else:
-        warnings.warn(
-            f"Starting Modin in compatibility mode to support legacy pandas version {__pandas_version__}"
-        )
-elif PandasCompatVersion.CURRENT == PandasCompatVersion.LATEST:
-    __pandas_version__ = "1.4.3"
-
-    if pandas.__version__ != __pandas_version__:
-        warnings.warn(
-            f"The pandas version installed {pandas.__version__} does not match the supported pandas version in"
-            + f" Modin {__pandas_version__}. This may cause undesired side effects!"
-        )
+if pandas.__version__ != __pandas_version__:
+    warnings.warn(
+        f"The pandas version installed {pandas.__version__} does not match the supported pandas version in"
+        + f" Modin {__pandas_version__}. This may cause undesired side effects!"
+    )
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -57,6 +42,7 @@ with warnings.catch_warnings():
         to_timedelta,
         set_eng_float_format,
         options,
+        Flags,
         set_option,
         NaT,
         PeriodIndex,
@@ -71,6 +57,8 @@ with warnings.catch_warnings():
         Int16Dtype,
         Int32Dtype,
         Int64Dtype,
+        Float32Dtype,
+        Float64Dtype,
         StringDtype,
         BooleanDtype,
         CategoricalDtype,
@@ -98,6 +86,7 @@ with warnings.catch_warnings():
         api,
     )
 import os
+import multiprocessing
 
 from modin.config import Engine, Parameter
 
@@ -226,6 +215,7 @@ from .general import (
     merge,
     merge_asof,
     merge_ordered,
+    pivot_table,
     notnull,
     notna,
     pivot,
@@ -239,14 +229,10 @@ from .general import (
     lreshape,
     wide_to_long,
 )
-
-from modin._compat.pandas_api.namespace import pivot_table
-from modin._compat import PandasCompatVersion
-
 from .plotting import Plotting as plotting
 from modin.utils import show_versions
 
-__all__ = [  # noqa: F405
+__all__ = [
     "DataFrame",
     "Series",
     "read_csv",
@@ -351,13 +337,6 @@ __all__ = [  # noqa: F405
     "datetime",
     "NamedAgg",
     "api",
-    "read_xml",
 ]
-
-if PandasCompatVersion.CURRENT != PandasCompatVersion.PY36:
-    from modin._compat.pandas_api.namespace import Flags, Float32Dtype, Float64Dtype
-
-    __all__.extend(["Flags", "Float32Dtype", "Float64Dtype"])
-del PandasCompatVersion
 
 del pandas, Engine, Parameter

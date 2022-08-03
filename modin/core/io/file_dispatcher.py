@@ -122,10 +122,6 @@ class FileDispatcher(ClassLogger):
     classes).
     """
 
-    BUFFER_UNSUPPORTED_MSG = (
-        "Reading from buffers or other non-path-like objects is not supported"
-    )
-
     frame_cls = None
     frame_partition_cls = None
     query_compiler_cls = None
@@ -265,10 +261,7 @@ class FileDispatcher(ClassLogger):
                 S3FS = import_optional_dependency(
                     "s3fs", "Module s3fs is required to read S3FS files."
                 )
-                from botocore.exceptions import (
-                    NoCredentialsError,
-                    EndpointConnectionError,
-                )
+                from botocore.exceptions import NoCredentialsError
 
                 if storage_options is not None:
                     new_storage_options = dict(storage_options)
@@ -280,7 +273,7 @@ class FileDispatcher(ClassLogger):
                 exists = False
                 try:
                     exists = s3fs.exists(file_path) or exists
-                except (NoCredentialsError, PermissionError, EndpointConnectionError):
+                except (NoCredentialsError, PermissionError):
                     pass
                 s3fs = S3FS.S3FileSystem(anon=True, **new_storage_options)
                 return exists or s3fs.exists(file_path)
@@ -345,7 +338,3 @@ class FileDispatcher(ClassLogger):
                 for i in range(len(partition_ids))
             ]
         )
-
-    @classmethod
-    def _file_not_found_msg(cls, filename: str):  # noqa: GL08
-        return f"No such file: '{filename}'"

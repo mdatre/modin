@@ -34,7 +34,7 @@ from modin.core.storage_formats.pandas.utils import compute_chunksize
 from modin.utils import _inherit_docstrings
 from modin.core.io.text.utils import CustomNewlineIterator
 from modin.config import NPartitions
-from modin._compat.core.base_io import _validate_usecols_arg
+from modin.error_message import ErrorMessage
 
 ColumnNamesTypes = Tuple[Union[pandas.Index, pandas.MultiIndex]]
 IndexColType = Union[int, str, bool, Sequence[int], Sequence[str], None]
@@ -616,7 +616,7 @@ class TextFileDispatcher(FileDispatcher):
         read_kwargs: dict,
         skiprows_md: Union[Sequence, callable, int],
         header_size: int,
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> bool:
         """
         Check support of only general parameters of `read_*` function.
 
@@ -635,21 +635,18 @@ class TextFileDispatcher(FileDispatcher):
         -------
         bool
             Whether passed parameters are supported or not.
-        Optional[str]
-            `None` if parameters are supported, otherwise an error
-            message describing why parameters are not supported.
         """
         skiprows = read_kwargs.get("skiprows")
         if isinstance(filepath_or_buffer, str):
             if not cls.file_exists(
                 filepath_or_buffer, read_kwargs.get("storage_options")
             ):
-                return (False, cls._file_not_found_msg(filepath_or_buffer))
+                return False
         elif not cls.pathlib_or_pypath(filepath_or_buffer):
-            return (False, cls.BUFFER_UNSUPPORTED_MSG)
+            return False
 
         if read_kwargs["chunksize"] is not None:
-            return (False, "`chunksize` parameter is not supported")
+            return False
 
         skiprows_supported = True
         if is_list_like(skiprows_md) and skiprows_md[0] < header_size:
@@ -663,16 +660,16 @@ class TextFileDispatcher(FileDispatcher):
                 skiprows_supported = False
 
         if not skiprows_supported:
-            return (
-                False,
-                "Values of `header` and `skiprows` parameters have intersections; "
-                + "this case is unsupported by Modin",
+            ErrorMessage.single_warning(
+                "Values of `header` and `skiprows` parameters have intersections. "
+                + "This case is unsupported by Modin, so pandas implementation will be used"
             )
+            return False
 
-        return (True, None)
+        return True
 
     @classmethod
-    @_inherit_docstrings(_validate_usecols_arg)
+    @_inherit_docstrings(pandas.io.parsers.base_parser.ParserBase._validate_usecols_arg)
     def _validate_usecols_arg(cls, usecols):
         msg = (
             "'usecols' must either be list-like of all strings, all unicode, "
@@ -989,7 +986,7 @@ class TextFileDispatcher(FileDispatcher):
             skiprows_md, int
         )
 
-        (use_modin_impl, fallback_reason) = cls.check_parameters_support(
+        use_modin_impl = cls.check_parameters_support(
             filepath_or_buffer,
             kwargs,
             skiprows_md,
@@ -997,10 +994,7 @@ class TextFileDispatcher(FileDispatcher):
         )
         if not use_modin_impl:
             return cls.single_worker_read(
-                filepath_or_buffer,
-                callback=cls.read_callback,
-                reason=fallback_reason,
-                **kwargs,
+                filepath_or_buffer, callback=cls.read_callback, **kwargs
             )
 
         is_quoting = kwargs["quoting"] != QUOTE_NONE

@@ -21,6 +21,7 @@ from modin.core.dataframe.pandas.partitioning.axis_partition import (
     PandasDataframeAxisPartition,
 )
 from modin.core.execution.ray.common.utils import deserialize
+from modin.core.storage_formats.pandas.utils import split_axis_partition
 from .partition import PandasOnRayDataframePartition
 
 
@@ -248,10 +249,26 @@ class PandasOnRayDataframeVirtualPartition(PandasDataframeAxisPartition):
         list
             List of ``PandasOnRayDataframePartition`` objects.
         """
+        cls_type = self.__class__
         return [
-            self.partition_type(object_id, length, width, ip)
+            cls_type(self.partition_type(object_id, length, width, ip))
             for (object_id, length, width, ip) in zip(*[iter(partitions)] * 4)
         ]
+
+    def split_blocks(self, num_splits, split_axis, max_retries=None):
+        grid_blocks = []
+        assert len(self.list_of_blocks) == 1
+        for obj in self.list_of_blocks:
+            # print("obj type", type(obj), num_splits)
+            split_blocks = deploy_ray_func.options(
+            num_returns=(num_splits * 4),
+            **({"max_retries": max_retries} if max_retries is not None else {}),
+        ).remote(split_axis_partition, obj, num_splits=num_splits, split_axis=split_axis)
+            # print("Split_blocks", len(split_blocks))
+            for df, l, w, ip in zip(*[iter(split_blocks)]*4):
+                grid_blocks.append(PandasOnRayDataframePartition(df, l, w, ip))
+        assert (len(grid_blocks) == num_splits)
+        return grid_blocks
 
     def apply(
         self,

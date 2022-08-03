@@ -43,13 +43,6 @@ from .buffer import PandasProtocolBuffer
 from .exception import NoValidityBuffer, NoOffsetsBuffer
 
 
-_NO_VALIDITY_BUFFER = {
-    ColumnNullType.NON_NULLABLE: "This column is non-nullable so does not have a mask",
-    ColumnNullType.USE_NAN: "This column uses NaN as null so does not have a separate mask",
-    ColumnNullType.USE_SENTINEL: "This column uses a sentinel value so does not have a mask",
-}
-
-
 @_inherit_docstrings(ProtocolColumn)
 class PandasProtocolColumn(ProtocolColumn):
     """
@@ -421,9 +414,11 @@ class PandasProtocolColumn(ProtocolColumn):
             self._validity_buffer_cache = (buffer, dtype)
             return self._validity_buffer_cache
 
-        try:
-            msg = _NO_VALIDITY_BUFFER[null]
-        except KeyError:
+        if null == ColumnNullType.NON_NULLABLE:
+            msg = "This column is non-nullable so does not have a mask"
+        elif null == ColumnNullType.USE_NAN:
+            msg = "This column uses NaN as null so does not have a separate mask"
+        else:
             raise NotImplementedError("See self.describe_null")
 
         raise NoValidityBuffer(msg)

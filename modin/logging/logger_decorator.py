@@ -72,7 +72,7 @@ def enable_logging(
     """
     if not isinstance(modin_layer, str):
         # assume the decorator is used in a form without parenthesis like:
-        # @enable_logging
+        # @logger_decorator
         # def func()
         return enable_logging()(modin_layer)
 

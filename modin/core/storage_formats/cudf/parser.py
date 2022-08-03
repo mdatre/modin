@@ -70,8 +70,8 @@ class cuDFParser(object):
         )
 
     @classmethod
-    def single_worker_read(cls, fname, *, reason, **kwargs):
-        ErrorMessage.default_to_pandas(reason=reason)
+    def single_worker_read(cls, fname, **kwargs):
+        ErrorMessage.default_to_pandas("Parameters provided")
         # Use default args for everything
         pandas_frame = cls.parse(fname, **kwargs)
         if isinstance(pandas_frame, pandas.io.parsers.TextFileReader):

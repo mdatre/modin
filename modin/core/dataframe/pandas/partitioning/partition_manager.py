@@ -27,8 +27,7 @@ import warnings
 from modin.error_message import ErrorMessage
 from modin.core.storage_formats.pandas.utils import compute_chunksize
 from modin.core.dataframe.pandas.utils import concatenate
-from modin.config import NPartitions, ProgressBar, BenchmarkMode, Engine, StorageFormat
-from modin.logging import ClassLogger
+from modin.config import NPartitions, ProgressBar, BenchmarkMode, Engine, StorageFormat, PartitionType
 
 import os
 
@@ -79,7 +78,7 @@ def wait_computations_if_benchmark_mode(func):
     return func
 
 
-class PandasDataframePartitionManager(ClassLogger, ABC):
+class PandasDataframePartitionManager(ABC):
     """
     Base class for managing the dataframe data layout and operators across the distribution of partitions.
 
@@ -205,11 +204,47 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
                     + "support virtual partitioning for row partitions yet."
                 )
             )
-        return (
-            cls.column_partitions(partitions)
-            if make_column_partitions
-            else cls.row_partitions(partitions)
-        )
+
+        assert (all(isinstance(o, cls._column_partitions_class) for o in partitions.flatten())\
+                or all(isinstance(o, cls._row_partition_class) for o in partitions.flatten())\
+                or all(isinstance(o, cls._partition_class) for o in partitions.flatten())
+                )
+
+        if axis == 0 and partitions.shape[0] == 1 and isinstance(partitions[0][0], cls._column_partitions_class):
+            return partitions
+
+        if axis == 1 and partitions.shape[1] == 1 and isinstance(partitions[0][0], cls._row_partition_class):
+            return partitions
+
+        if isinstance(partitions[0][0], cls._partition_class) or 1 not in partitions.shape:
+            return (
+                cls.column_partitions(partitions)
+                if make_column_partitions
+                else cls.row_partitions(partitions)
+            )
+
+        num_splits = partitions.shape[0] * partitions.shape[1]
+
+        if axis == 1:
+            block_partitions = []
+            for i, p in enumerate(partitions.flatten()):
+                if isinstance(p, cls._column_partitions_class):
+                    assert (len(p.list_of_blocks) == 1 and isinstance(p.list_of_partitions_to_combine[0], cls._partition_class))
+                    block_partitions.append(p.split_blocks(num_splits=num_splits, split_axis=axis))
+                else:
+                    assert False, "The blocks inside virtual axis partitions are supposed to be of partition class"
+            return cls.row_partitions(np.array(np.transpose(block_partitions)))
+        elif axis == 0:
+            block_partitions = []
+            for i, p in enumerate(partitions.flatten()):
+                if isinstance(p, cls._row_partition_class):
+                    assert (len(p.list_of_blocks) == 1 and isinstance(p.list_of_partitions_to_combine[0],
+                                                                             cls._partition_class))
+                    block_partitions.append(p.split_blocks(num_splits=num_splits, split_axis=axis))
+                else:
+                    assert False, "The blocks inside virtual axis partitions are supposed to be of partition class"
+            return cls.column_partitions(np.array(block_partitions))
+
 
     @classmethod
     def groupby_reduce(
@@ -436,11 +471,16 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
         # operation, we will just use this time to compute the number of
         # partitions as best we can right now.
         if keep_partitioning:
-            num_splits = len(left) if axis == 0 else len(left.T)
+            num_splits = len(left) if axis == 1 else len(left.T)
         elif lengths:
             num_splits = len(lengths)
         else:
             num_splits = NPartitions.get()
+
+        # Do not split results eagerly if we are using axis partitions.
+        if PartitionType.get() != "block":
+            num_splits = 1
+
         preprocessed_map_func = cls.preprocess_func(apply_func)
         left_partitions = cls.axis_partition(left, axis)
         right_partitions = None if right is None else cls.axis_partition(right, axis)
@@ -714,6 +754,17 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
         row_chunksize = compute_chunksize(df.shape[0], num_splits)
         col_chunksize = compute_chunksize(df.shape[1], num_splits)
 
+        partition_type = PartitionType.get()
+        if partition_type != "block":
+            num_splits = ((max(1, round(len(df) / row_chunksize))) *
+                          (max(1, round(len(df.columns) / col_chunksize))))
+        if partition_type == "column":
+            row_chunksize = df.shape[0]
+            col_chunksize = compute_chunksize(df.shape[1], num_splits, min_block_size=1)
+        elif partition_type == "row":
+            col_chunksize = df.shape[1]
+            row_chunksize = compute_chunksize(df.shape[0], num_splits, min_block_size=1)
+
         bar_format = (
             "{l_bar}{bar}{r_bar}"
             if os.environ.get("DEBUG_PROGRESS_BAR", "False") == "True"
@@ -737,6 +788,20 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
             )
         else:
             pbar = None
+
+        row_lengths = [
+            row_chunksize
+            if i + row_chunksize < len(df)
+            else len(df) % row_chunksize or row_chunksize
+            for i in range(0, len(df), row_chunksize)
+        ]
+        col_widths = [
+            col_chunksize
+            if i + col_chunksize < len(df.columns)
+            else len(df.columns) % col_chunksize or col_chunksize
+            for i in range(0, len(df.columns), col_chunksize)
+        ]
+
         parts = [
             [
                 update_bar(
@@ -749,23 +814,38 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
             ]
             for i in range(0, len(df), row_chunksize)
         ]
+
+        if partition_type == "column":
+            column_blocks = []
+            # Go over each block column and collect its parts
+            for j in range(len(parts[0])):
+                blocks_of_column = []
+                # Go over each block row
+                for i in range(len(parts)):
+                    blocks_of_column.append(parts[i][j])
+                # Now we have all blocks of column axis
+                column_blocks.append(cls._column_partitions_class(blocks_of_column,
+                                                                  full_axis = True if len(blocks_of_column) == 1 else False))
+            parts = [column_blocks]
+        elif partition_type == "row":
+            row_parts = []
+            # Go over each block row and collect its parts
+            for i in range(len(parts)):
+                blocks_of_row = []
+                # Go over each block row
+                for j in range(len(parts[0])):
+                    blocks_of_row.append(parts[i][j])
+                # Now we have all blocks of column axis
+                row_parts.append([cls._row_partition_class(blocks_of_row,
+                                                           full_axis = True if len(blocks_of_row) == 1 else False)])
+            parts = row_parts
+        # If partition type is block leave parts as they are.
+
         if ProgressBar.get():
             pbar.close()
         if not return_dims:
             return np.array(parts)
         else:
-            row_lengths = [
-                row_chunksize
-                if i + row_chunksize < len(df)
-                else len(df) % row_chunksize or row_chunksize
-                for i in range(0, len(df), row_chunksize)
-            ]
-            col_widths = [
-                col_chunksize
-                if i + col_chunksize < len(df.columns)
-                else len(df.columns) % col_chunksize or col_chunksize
-                for i in range(0, len(df.columns), col_chunksize)
-            ]
             return np.array(parts), row_lengths, col_widths
 
     @classmethod
@@ -831,6 +911,10 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
             partition.wait()
 
     @classmethod
+    def get_new_indices_by_partition_type(cls, axis, partitions, index_func=None):
+        raise NotImplementedError()
+
+    @classmethod
     def get_indices(cls, axis, partitions, index_func=None):
         """
         Get the internal indices stored in the partitions.
@@ -848,8 +932,6 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
         -------
         pandas.Index
             A pandas Index object.
-        list of pandas.Index
-            The list of internal indices for each partition.
 
         Notes
         -----
@@ -857,16 +939,24 @@ class PandasDataframePartitionManager(ClassLogger, ABC):
         when you have deleted rows/columns internally, but do not know
         which ones were deleted.
         """
-        if index_func is None:
-            index_func = lambda df: df.axes[axis]  # noqa: E731
         ErrorMessage.catch_bugs_and_request_email(not callable(index_func))
-        func = cls.preprocess_func(index_func)
-        target = partitions.T if axis == 0 else partitions
-        new_idx = [idx.apply(func) for idx in target[0]] if len(target) else []
+        new_idx = cls.get_new_indices_by_partition_type(axis, partitions, index_func)
+        # func = cls.preprocess_func(index_func)
+        # if axis == 0:
+        #     print("get_indices axis 0")
+        #     new_idx = (
+        #         [idx.apply(func) for idx in partitions.T[0]]
+        #         if len(partitions.T)
+        #         else []
+        #     )
+        # else:
+        #     print("get_indices axis 1")
+        #     new_idx = (
+        #         [idx.apply(func) for idx in partitions[0]] if len(partitions) else []
+        #     )
         new_idx = cls.get_objects_from_partitions(new_idx)
         # TODO FIX INFORMATION LEAK!!!!1!!1!!
-        total_idx = new_idx[0].append(new_idx[1:]) if new_idx else new_idx
-        return total_idx, new_idx
+        return new_idx[0].append(new_idx[1:]) if len(new_idx) else new_idx
 
     @classmethod
     def _apply_func_to_list_of_partitions_broadcast(

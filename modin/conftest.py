@@ -17,8 +17,9 @@ import pytest
 import pandas
 from pandas.util._decorators import doc
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import shutil
-from typing import Optional
 
 assert (
     "modin.utils" not in sys.modules
@@ -446,8 +447,8 @@ def make_parquet_file():
         nrows=NROWS,
         ncols=2,
         force=True,
+        directory=False,
         partitioned_columns=[],
-        row_group_size: Optional[int] = None,
     ):
         """Helper function to generate parquet files/directories.
 
@@ -456,21 +457,25 @@ def make_parquet_file():
             nrows: Number of rows for the dataframe.
             ncols: Number of cols for the dataframe.
             force: Create a new file/directory even if one already exists.
+            directory: Create a partitioned directory using pyarrow.
             partitioned_columns: Create a partitioned directory using pandas.
-            row_group_size: Maximum size of each row group.
+            Will be ignored if directory=True.
         """
         if force or not os.path.exists(filename):
             df = pandas.DataFrame(
                 {f"col{x + 1}": np.arange(nrows) for x in range(ncols)}
             )
-            if len(partitioned_columns) > 0:
-                df.to_parquet(
-                    filename,
-                    partition_cols=partitioned_columns,
-                    row_group_size=row_group_size,
-                )
+            if directory:
+                if os.path.exists(filename):
+                    shutil.rmtree(filename)
+                else:
+                    os.makedirs(filename)
+                table = pa.Table.from_pandas(df)
+                pq.write_to_dataset(table, root_path=filename)
+            elif len(partitioned_columns) > 0:
+                df.to_parquet(filename, partition_cols=partitioned_columns)
             else:
-                df.to_parquet(filename, row_group_size=row_group_size)
+                df.to_parquet(filename)
             filenames.append(filename)
 
     # Return function that generates parquet files

@@ -12,6 +12,7 @@
 # governing permissions and limitations under the License.
 
 """Collection of general utility functions, mostly for internal use."""
+from __future__ import annotations
 
 import importlib
 import types
@@ -208,7 +209,7 @@ def append_to_docstring(message: str):
     """
 
     def decorator(func):
-        to_append = align_indents(func.__doc__ or "", message)
+        to_append = align_indents(func.__doc__, message)
         return Appender(to_append)(func)
 
     return decorator
@@ -579,7 +580,7 @@ def import_optional_dependency(name, message):
         ) from None
 
 
-def _get_modin_deps_info() -> "dict[str, JSONSerializable]":
+def _get_modin_deps_info() -> dict[str, JSONSerializable]:
     """
     Return Modin-specific dependencies information as a JSON serializable dictionary.
 
@@ -624,7 +625,7 @@ def _get_modin_deps_info() -> "dict[str, JSONSerializable]":
 
 # Disable flake8 checks for print() in this file
 # flake8: noqa: T001
-def show_versions(as_json: Union[str, bool] = False) -> None:
+def show_versions(as_json: str | bool = False) -> None:
     """
     Provide useful information, important for bug reports.
 
