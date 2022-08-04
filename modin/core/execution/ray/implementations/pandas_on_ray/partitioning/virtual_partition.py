@@ -315,6 +315,10 @@ class PandasOnRayDataframeVirtualPartition(PandasDataframeAxisPartition):
         if len(self.call_queue) > 0:
             self.drain_call_queue()
         kwargs["args"] = args
+
+        for part in self.list_of_partitions_to_combine:
+            assert (isinstance(part, PandasOnRayDataframePartition)), f"Part type {type(part)}"
+
         result = super(PandasOnRayDataframeVirtualPartition, self).apply(
             func,
             num_splits,
@@ -421,6 +425,55 @@ class PandasOnRayDataframeVirtualPartition(PandasDataframeAxisPartition):
                 self._width_cache = self.list_of_partitions_to_combine[0].width()
         return self._width_cache
 
+    def update_partitions(self, new_partitions):
+        if not any(
+            isinstance(obj, PandasOnRayDataframeVirtualPartition)
+            for obj in new_partitions
+        ):
+            self.list_of_partitions_to_combine = new_partitions
+            return
+        # Check that all axis are the same in `list_of_blocks`
+        # We should never have mismatching axis in the current implementation. We add this
+        # defensive assertion to ensure that undefined behavior does not happen.
+        assert (
+            len(
+                set(
+                    obj.axis
+                    for obj in new_partitions
+                    if isinstance(obj, PandasOnRayDataframeVirtualPartition)
+                )
+            )
+            == 1
+        )
+        # When the axis of all virtual partitions matches this axis,
+        # extend and combine the lists of physical partitions.
+        if (
+            next(
+                obj
+                for obj in new_partitions
+                if isinstance(obj, PandasOnRayDataframeVirtualPartition)
+            ).axis
+            == self.axis
+        ):
+            new_list_of_blocks = []
+            for obj in new_partitions:
+                new_list_of_blocks.extend(
+                    obj.list_of_partitions_to_combine
+                ) if isinstance(
+                    obj, PandasOnRayDataframeVirtualPartition
+                ) else new_list_of_blocks.append(
+                    obj
+                )
+            self.list_of_partitions_to_combine = new_list_of_blocks
+        # Materialize partitions if the axis of this virtual does not match the virtual partitions
+        else:
+            self.list_of_partitions_to_combine = [
+                obj.force_materialization().list_of_partitions_to_combine[0]
+                if isinstance(obj, PandasOnRayDataframeVirtualPartition)
+                else obj
+                for obj in new_partitions
+            ]
+
     def drain_call_queue(self, num_splits=None):
         """
         Execute all operations stored in this partition's call queue.
@@ -439,7 +492,12 @@ class PandasOnRayDataframeVirtualPartition(PandasDataframeAxisPartition):
         drained = super(PandasOnRayDataframeVirtualPartition, self).apply(
             drain, num_splits=num_splits
         )
-        self.list_of_partitions_to_combine = drained
+        # #TODO: Debugging remove later
+        # for part in drained:
+        #     print("drain_call_queue: part type", type(part))
+
+        # self.list_of_partitions_to_combine = drained
+        self.update_partitions(drained)
         self.call_queue = []
 
     def wait(self):
