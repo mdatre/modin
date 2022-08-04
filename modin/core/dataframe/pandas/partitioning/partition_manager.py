@@ -211,10 +211,10 @@ class PandasDataframePartitionManager(ABC):
                 )
 
         if axis == 0 and partitions.shape[0] == 1 and isinstance(partitions[0][0], cls._column_partitions_class):
-            return partitions
+            return partitions.flatten()
 
         if axis == 1 and partitions.shape[1] == 1 and isinstance(partitions[0][0], cls._row_partition_class):
-            return partitions
+            return partitions.flatten()
 
         if isinstance(partitions[0][0], cls._partition_class) or 1 not in partitions.shape:
             return (
