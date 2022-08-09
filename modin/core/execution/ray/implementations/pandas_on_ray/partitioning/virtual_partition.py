@@ -486,7 +486,8 @@ class PandasOnRayDataframeVirtualPartition(PandasDataframeAxisPartition):
 
         def drain(df):
             for func, args, kwargs in self.call_queue:
-                df = func(df, *args, **kwargs)
+                drain_func = ray.get(func)
+                df = drain_func(df, *args, **kwargs)
             return df
 
         drained = super(PandasOnRayDataframeVirtualPartition, self).apply(
