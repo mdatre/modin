@@ -16,6 +16,7 @@ import pandas
 import matplotlib
 import modin.pandas as pd
 
+from modin._compat import PandasCompatVersion
 from modin.core.dataframe.pandas.partitioning.axis_partition import (
     PandasDataframeAxisPartition,
 )
@@ -27,6 +28,7 @@ from modin.pandas.test.utils import (
     test_data,
     create_test_dfs,
     default_to_pandas_ignore_string,
+    CustomIntegerForAddition,
 )
 from modin.config import Engine, NPartitions
 from modin.test.test_utils import warns_that_defaulting_to_pandas
@@ -47,8 +49,21 @@ pytestmark = pytest.mark.filterwarnings(default_to_pandas_ignore_string)
     [
         lambda df: 4,
         lambda df, axis: df.iloc[0] if axis == "columns" else list(df[df.columns[0]]),
+        lambda df, axis: {
+            label: idx + 1
+            for idx, label in enumerate(df.axes[0 if axis == "rows" else 1])
+        },
+        lambda df, axis: {
+            label if idx % 2 else f"random_key{idx}": idx + 1
+            for idx, label in enumerate(df.axes[0 if axis == "rows" else 1][::-1])
+        },
     ],
-    ids=["scalar", "series_or_list"],
+    ids=[
+        "scalar",
+        "series_or_list",
+        "dictionary_keys_equal_columns",
+        "dictionary_keys_unequal_columns",
+    ],
 )
 @pytest.mark.parametrize("axis", ["rows", "columns"])
 @pytest.mark.parametrize(
@@ -267,6 +282,8 @@ def test_mismatched_row_partitions(is_idx_aligned, op_type, is_more_other_partit
     elif op_type == "ser_ser_different_name":
         modin_res = modin_df2.a / modin_df1.b
         pandas_res = pandas_df2.a / pandas_df1.b
+    else:
+        raise Exception(f"op_type: {op_type} not supported in test")
     df_equals(modin_res, pandas_res)
 
 
@@ -321,3 +338,18 @@ def test_add_string_to_df():
     modin_df, pandas_df = create_test_dfs(["a", "b"])
     eval_general(modin_df, pandas_df, lambda df: "string" + df)
     eval_general(modin_df, pandas_df, lambda df: df + "string")
+
+
+@pytest.mark.xfail(
+    PandasCompatVersion.CURRENT == PandasCompatVersion.PY36,
+    reason="Seems to be a bug in pandas 1.1.5. pandas throws ValueError "
+    + "for this particular dataframe.",
+)
+def test_add_custom_class():
+    # see https://github.com/modin-project/modin/issues/5236
+    # Test that we can add any object that is addable to pandas object data
+    # via "+".
+    eval_general(
+        *create_test_dfs(test_data["int_data"]),
+        lambda df: df + CustomIntegerForAddition(4),
+    )

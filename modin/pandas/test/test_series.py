@@ -74,6 +74,7 @@ from .utils import (
     test_data_large_categorical_series_keys,
     test_data_large_categorical_series_values,
     default_to_pandas_ignore_string,
+    CustomIntegerForAddition,
 )
 from modin.config import NPartitions
 
@@ -635,6 +636,16 @@ def test_add_suffix(data):
     )
 
 
+def test_add_custom_class():
+    # see https://github.com/modin-project/modin/issues/5236
+    # Test that we can add any object that is addable to pandas object data
+    # via "+".
+    eval_general(
+        *create_test_series(test_data["int_data"]),
+        lambda df: df + CustomIntegerForAddition(4),
+    )
+
+
 @pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
 @pytest.mark.parametrize("func", agg_func_values, ids=agg_func_keys)
 def test_agg(data, func):
@@ -1135,8 +1146,9 @@ def test_array(data):
 
 
 @pytest.mark.xfail(reason="Using pandas Series.")
-def test_between():
-    modin_series = create_test_series()
+@pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
+def test_between(data):
+    modin_series = create_test_series(data)
 
     with pytest.raises(NotImplementedError):
         modin_series.between(None, None)
@@ -1577,8 +1589,9 @@ def test_matmul(data):
 
 
 @pytest.mark.xfail(reason="Using pandas Series.")
-def test_drop():
-    modin_series = create_test_series()
+@pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
+def test_drop(data):
+    modin_series = create_test_series(data)
 
     with pytest.raises(NotImplementedError):
         modin_series.drop(None, None, None, None)
@@ -1733,6 +1746,22 @@ def test_dt(timezone):
     df_equals(modin_series.dt.end_time, pandas_series.dt.end_time)
     df_equals(modin_series.dt.to_timestamp(), pandas_series.dt.to_timestamp())
 
+    def dt_with_empty_partition(lib):
+        # For context, see https://github.com/modin-project/modin/issues/5112
+        df_a = lib.DataFrame({"A": [lib.to_datetime("26/10/2020")]})
+        df_b = lib.DataFrame({"B": [lib.to_datetime("27/10/2020")]})
+        df = lib.concat([df_a, df_b], axis=1)
+        eval_result = df.eval("B - A", engine="python")
+        # BaseOnPython had a single partition after the concat, and it
+        # maintains that partition after eval. In other execution modes,
+        # eval() should re-split the result into two column partitions,
+        # one of which is empty.
+        if isinstance(df, pd.DataFrame) and get_current_execution() != "BaseOnPython":
+            assert eval_result._query_compiler._modin_frame._partitions.shape == (1, 2)
+        return eval_result.dt.days
+
+    eval_general(pd, pandas, dt_with_empty_partition)
+
 
 @pytest.mark.parametrize(
     "data", test_data_with_duplicates_values, ids=test_data_with_duplicates_keys
@@ -1863,8 +1892,9 @@ def test_fillna(data, reindex, limit):
 
 
 @pytest.mark.xfail(reason="Using pandas Series.")
-def test_filter():
-    modin_series = create_test_series()
+@pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
+def test_filter(data):
+    modin_series = create_test_series(data)
 
     with pytest.raises(NotImplementedError):
         modin_series.filter(None, None, None)
@@ -2384,8 +2414,9 @@ def test_ne(data):
 
 
 @pytest.mark.xfail(reason="Using pandas Series.")
-def test_nlargest():
-    modin_series = create_test_series()
+@pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
+def test_nlargest(data):
+    modin_series = create_test_series(data)
 
     with pytest.raises(NotImplementedError):
         modin_series.nlargest(None)
@@ -2861,8 +2892,9 @@ def test_reset_index(data, drop, name, inplace):
 
 
 @pytest.mark.xfail(reason="Using pandas Series.")
-def test_reshape():
-    modin_series = create_test_series()
+@pytest.mark.parametrize("data", test_data_values, ids=test_data_keys)
+def test_reshape(data):
+    modin_series = create_test_series(data)
 
     with pytest.raises(NotImplementedError):
         modin_series.reshape(None)

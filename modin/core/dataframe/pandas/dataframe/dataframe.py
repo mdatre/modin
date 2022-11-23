@@ -28,6 +28,7 @@ from pandas._libs.lib import no_default
 from typing import List, Hashable, Optional, Callable, Union, Dict, TYPE_CHECKING
 
 from modin.core.storage_formats.pandas.query_compiler import PandasQueryCompiler
+from modin.core.storage_formats.pandas.utils import get_length_list
 from modin.error_message import ErrorMessage
 from modin.core.storage_formats.pandas.parsers import (
     find_common_type_cat as find_common_type,
@@ -248,14 +249,7 @@ class PandasDataframe(ClassLogger):
         if self._row_lengths_cache is None:
             if len(self._partitions.T) > 0:
                 row_parts = self._partitions.T[0]
-                if self._index_cache is not None:
-                    # do not do extra work to get an index that is already known
-                    self._row_lengths_cache = [part.length() for part in row_parts]
-                else:
-                    (
-                        self._index_cache,
-                        self._row_lengths_cache,
-                    ) = self._compute_axis_labels_and_lengths(0)
+                self._row_lengths_cache = [part.length() for part in row_parts]
             else:
                 self._row_lengths_cache = []
         return self._row_lengths_cache
@@ -273,14 +267,7 @@ class PandasDataframe(ClassLogger):
         if self._column_widths_cache is None:
             if len(self._partitions) > 0:
                 col_parts = self._partitions[0]
-                if self._columns_cache is not None:
-                    # do not do extra work to get columns that is already known
-                    self._column_widths_cache = [part.width() for part in col_parts]
-                else:
-                    (
-                        self._columns_cache,
-                        self._column_widths_cache,
-                    ) = self._compute_axis_labels_and_lengths(1)
+                self._column_widths_cache = [part.width() for part in col_parts]
             else:
                 self._column_widths_cache = []
         return self._column_widths_cache
@@ -548,9 +535,7 @@ class PandasDataframe(ClassLogger):
         if axis is None:
 
             def apply_idx_objs(df, idx, cols):
-                return df.set_axis(idx, axis="index", inplace=False).set_axis(
-                    cols, axis="columns", inplace=False
-                )
+                return df.set_axis(idx, axis="index").set_axis(cols, axis="columns")
 
             self._partitions = np.array(
                 [
@@ -576,7 +561,7 @@ class PandasDataframe(ClassLogger):
         elif axis == 0:
 
             def apply_idx_objs(df, idx):
-                return df.set_axis(idx, axis="index", inplace=False)
+                return df.set_axis(idx, axis="index")
 
             self._partitions = np.array(
                 [
@@ -598,7 +583,7 @@ class PandasDataframe(ClassLogger):
         elif axis == 1:
 
             def apply_idx_objs(df, cols):
-                return df.set_axis(cols, axis="columns", inplace=False)
+                return df.set_axis(cols, axis="columns")
 
             self._partitions = np.array(
                 [
@@ -667,11 +652,31 @@ class PandasDataframe(ClassLogger):
 
         if row_labels is not None:
             # Get numpy array of positions of values from `row_labels`
-            row_positions = self.index.get_indexer_for(row_labels)
+            if isinstance(self.index, pandas.MultiIndex):
+                row_positions = np.zeros(len(row_labels), dtype="int64")
+                # we can't use .get_locs(row_labels) because the function
+                # requires a different format for row_labels
+                for idx, label in enumerate(row_labels):
+                    if isinstance(label, str):
+                        label = [label]
+                    # get_loc can return slice that _take_2d_positional can't handle
+                    row_positions[idx] = self.index.get_locs(label)[0]
+            else:
+                row_positions = self.index.get_indexer_for(row_labels)
 
         if col_labels is not None:
             # Get numpy array of positions of values from `col_labels`
-            col_positions = self.columns.get_indexer_for(col_labels)
+            if isinstance(self.columns, pandas.MultiIndex):
+                col_positions = np.zeros(len(col_labels), dtype="int64")
+                # we can't use .get_locs(col_labels) because the function
+                # requires a different format for row_labels
+                for idx, label in enumerate(col_labels):
+                    if isinstance(label, str):
+                        label = [label]
+                    # get_loc can return slice that _take_2d_positional can't handle
+                    col_positions[idx] = self.columns.get_locs(label)[0]
+            else:
+                col_positions = self.columns.get_indexer_for(col_labels)
 
         return self._take_2d_positional(row_positions, col_positions)
 
@@ -1056,12 +1061,17 @@ class PandasDataframe(ClassLogger):
         extracted_columns = self.take_2d_labels_or_positional(
             col_labels=column_list
         ).to_pandas()
+
         if len(column_list) == 1:
-            new_labels = pandas.Index(extracted_columns.squeeze(axis=1))
+            new_labels = pandas.Index(
+                extracted_columns.squeeze(axis=1), name=column_list[0]
+            )
         else:
-            new_labels = pandas.MultiIndex.from_frame(extracted_columns)
+            new_labels = pandas.MultiIndex.from_frame(
+                extracted_columns, names=column_list
+            )
         result = self.take_2d_labels_or_positional(
-            col_labels=[i for i in self.columns if i not in column_list]
+            col_labels=[i for i in self.columns if i not in extracted_columns.columns]
         )
         result.index = new_labels
         return result
@@ -1085,23 +1095,59 @@ class PandasDataframe(ClassLogger):
         PandasDataframe
             A new PandasDataframe with reordered columns and/or rows.
         """
+        new_lengths, new_widths = None, None
+        new_dtypes = self._dtypes
         if row_positions is not None:
             ordered_rows = self._partition_mgr_cls.map_axis_partitions(
                 0, self._partitions, lambda df: df.iloc[row_positions]
             )
             row_idx = self.index[row_positions]
+
+            if self._partitions.shape[0] != ordered_rows.shape[0] or len(
+                row_idx
+            ) != len(self.index):
+                # The frame was re-partitioned along the 0 axis during reordering using
+                # the "standard" partitioning. Knowing the standard partitioning scheme
+                # we are able to compute new row lengths.
+                new_lengths = get_length_list(
+                    axis_len=len(row_idx), num_splits=ordered_rows.shape[0]
+                )
+            else:
+                # If the frame's partitioning was preserved then
+                # we can use previous row lengths cache
+                new_lengths = self._row_lengths_cache
         else:
             ordered_rows = self._partitions
             row_idx = self.index
+            new_lengths = self._row_lengths_cache
         if col_positions is not None:
             ordered_cols = self._partition_mgr_cls.map_axis_partitions(
                 1, ordered_rows, lambda df: df.iloc[:, col_positions]
             )
             col_idx = self.columns[col_positions]
+            if new_dtypes is not None:
+                new_dtypes = self._dtypes.iloc[col_positions]
+
+            if self._partitions.shape[1] != ordered_cols.shape[1] or len(
+                col_idx
+            ) != len(self.columns):
+                # The frame was re-partitioned along the 1 axis during reordering using
+                # the "standard" partitioning. Knowing the standard partitioning scheme
+                # we are able to compute new column widths.
+                new_widths = get_length_list(
+                    axis_len=len(col_idx), num_splits=ordered_cols.shape[1]
+                )
+            else:
+                # If the frame's partitioning was preserved then
+                # we can use previous column widths cache
+                new_widths = self._column_widths_cache
         else:
             ordered_cols = ordered_rows
             col_idx = self.columns
-        return self.__constructor__(ordered_cols, row_idx, col_idx)
+            new_widths = self._column_widths_cache
+        return self.__constructor__(
+            ordered_cols, row_idx, col_idx, new_lengths, new_widths, new_dtypes
+        )
 
     @lazy_metadata_decorator(apply_axis=None)
     def copy(self):
@@ -1172,10 +1218,10 @@ class PandasDataframe(ClassLogger):
         )
         return self.__constructor__(
             new_frame,
-            self.index,
-            self.columns,
-            self.row_lengths,
-            self.column_widths,
+            self._index_cache,
+            self._columns_cache,
+            self._row_lengths_cache,
+            self._column_widths_cache,
             new_dtypes,
         )
 
@@ -1689,8 +1735,8 @@ class PandasDataframe(ClassLogger):
             )
         return self.__constructor__(
             new_partitions,
-            self.axes[0],
-            self.axes[1],
+            self._index_cache,
+            self._columns_cache,
             self._row_lengths_cache,
             self._column_widths_cache,
             dtypes=dtypes,
@@ -1757,10 +1803,10 @@ class PandasDataframe(ClassLogger):
         )
         return self.__constructor__(
             new_partitions,
-            self.index,
-            self.columns,
-            self.row_lengths,
-            self.column_widths,
+            self._index_cache,
+            self._columns_cache,
+            self._row_lengths_cache,
+            self._column_widths_cache,
         )
 
     def infer_objects(self) -> "PandasDataframe":
@@ -1802,10 +1848,10 @@ class PandasDataframe(ClassLogger):
         new_dtypes[col_labels] = new_cols_dtypes
         return self.__constructor__(
             self._partitions,
-            self.index,
-            self.columns,
-            self.row_lengths,
-            self.column_widths,
+            self._index_cache,
+            self._columns_cache,
+            self._row_lengths_cache,
+            self._column_widths_cache,
             new_dtypes,
         )
 
@@ -1910,8 +1956,8 @@ class PandasDataframe(ClassLogger):
             new_parts,
             new_index,
             new_cols,
-            self.row_lengths,
-            self.column_widths,
+            self._row_lengths_cache,
+            self._column_widths_cache,
             new_dtypes,
         )
 
@@ -2662,7 +2708,9 @@ class PandasDataframe(ClassLogger):
         return (reindexed_frames[0], reindexed_frames[1:], joined_index, base_lengths)
 
     @lazy_metadata_decorator(apply_axis="both")
-    def n_ary_op(self, op, right_frames: list, join_type="outer"):
+    def n_ary_op(
+        self, op, right_frames: list, join_type="outer", copartition_along_columns=True
+    ):
         """
         Perform an n-opary operation by joining with other Modin DataFrame(s).
 
@@ -2674,6 +2722,9 @@ class PandasDataframe(ClassLogger):
             Modin DataFrames to join with.
         join_type : str, default: "outer"
             Type of join to apply.
+        copartition_along_columns : bool, default: True
+            Whether to perform copartitioning along columns or not.
+            For some ops this isn't needed (e.g., `fillna`).
 
         Returns
         -------
@@ -2683,26 +2734,35 @@ class PandasDataframe(ClassLogger):
         left_parts, list_of_right_parts, joined_index, row_lengths = self._copartition(
             0, right_frames, join_type, sort=True
         )
-        new_left_frame = self.__constructor__(
-            left_parts, joined_index, self.columns, row_lengths, self.column_widths
-        )
-        new_right_frames = [
-            self.__constructor__(
-                right_parts,
-                joined_index,
-                right_frame.columns,
-                row_lengths,
-                right_frame.column_widths,
+        if copartition_along_columns:
+            new_left_frame = self.__constructor__(
+                left_parts, joined_index, self.columns, row_lengths, self.column_widths
             )
-            for right_parts, right_frame in zip(list_of_right_parts, right_frames)
-        ]
+            new_right_frames = [
+                self.__constructor__(
+                    right_parts,
+                    joined_index,
+                    right_frame.columns,
+                    row_lengths,
+                    right_frame.column_widths,
+                )
+                for right_parts, right_frame in zip(list_of_right_parts, right_frames)
+            ]
 
-        (
-            left_parts,
-            list_of_right_parts,
-            joined_columns,
-            column_widths,
-        ) = new_left_frame._copartition(1, new_right_frames, join_type, sort=True)
+            (
+                left_parts,
+                list_of_right_parts,
+                joined_columns,
+                column_widths,
+            ) = new_left_frame._copartition(
+                1,
+                new_right_frames,
+                join_type,
+                sort=True,
+            )
+        else:
+            joined_columns = self._columns_cache
+            column_widths = self._column_widths_cache
 
         new_frame = (
             np.array([])
@@ -2833,7 +2893,7 @@ class PandasDataframe(ClassLogger):
             new_columns = self.columns.append([other.columns for other in others])
             new_index = joined_index
             if self._dtypes is not None and all(o._dtypes is not None for o in others):
-                new_dtypes = self.dtypes.append([o.dtypes for o in others])
+                new_dtypes = pandas.concat([self.dtypes] + [o.dtypes for o in others])
             # If we have already cached the width of each column in at least one
             # of the column's partitions, we can build new_widths for the new
             # frame. Typically, if we know the width for any partition in a
@@ -3105,10 +3165,10 @@ class PandasDataframe(ClassLogger):
             new_dtypes = None
         return self.__constructor__(
             new_partitions,
-            self.columns,
-            self.index,
-            self.column_widths,
-            self.row_lengths,
+            self._columns_cache,
+            self._index_cache,
+            self._column_widths_cache,
+            self._row_lengths_cache,
             dtypes=new_dtypes,
         )
 

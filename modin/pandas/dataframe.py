@@ -34,6 +34,7 @@ import sys
 from typing import IO, Optional, Union, Iterator
 import warnings
 
+import modin
 from modin.pandas import Categorical
 from modin.error_message import ErrorMessage
 from modin.utils import (
@@ -178,6 +179,26 @@ class DataFrame(DataFrameCompat, BasePandasDataset):
             elif is_dict_like(data) and not isinstance(
                 data, (pandas.Series, Series, pandas.DataFrame, DataFrame)
             ):
+                if columns is not None:
+                    data = {key: value for key, value in data.items() if key in columns}
+
+                if len(data) and all(isinstance(v, Series) for v in data.values()):
+                    from .general import concat
+
+                    new_qc = concat(
+                        data.values(), axis=1, keys=data.keys()
+                    )._query_compiler
+
+                    if dtype is not None:
+                        new_qc = new_qc.astype({col: dtype for col in new_qc.columns})
+                    if index is not None:
+                        new_qc = new_qc.reindex(axis=0, labels=index)
+                    if columns is not None:
+                        new_qc = new_qc.reindex(axis=1, labels=columns)
+
+                    self._query_compiler = new_qc
+                    return
+
                 data = {
                     k: v._to_pandas() if isinstance(v, Series) else v
                     for k, v in data.items()
@@ -1421,7 +1442,7 @@ class DataFrame(DataFrameCompat, BasePandasDataset):
                 self._query_compiler.memory_usage(index=False, deep=deep)
             )
             index_value = self.index.memory_usage(deep=deep)
-            return Series(index_value, index=["Index"]).append(result)
+            return modin.pandas.concat([Series(index_value, index=["Index"]), result])
         return super(DataFrame, self).memory_usage(index=index, deep=deep)
 
     def merge(
@@ -2525,6 +2546,27 @@ class DataFrame(DataFrameCompat, BasePandasDataset):
                 )
                 self._update_inplace(new_qc)
                 # self.loc[:, key] = value
+                return
+            elif (
+                isinstance(key, list)
+                and isinstance(value, type(self))
+                # Mixed case is more complicated, it's defaulting to pandas for now
+                and all((x not in self.columns for x in key))
+            ):
+                if len(key) != len(value.columns):
+                    raise ValueError("Columns must be same length as key")
+
+                # Aligning the value's columns with the key
+                if not np.array_equal(value.columns, key):
+                    value = value.set_axis(key, axis=1)
+
+                new_qc = self._query_compiler.insert_item(
+                    axis=1,
+                    loc=len(self.columns),
+                    value=value._query_compiler,
+                    how="left",
+                )
+                self._update_inplace(new_qc)
                 return
 
             def setitem_unhashable_key(df, value):

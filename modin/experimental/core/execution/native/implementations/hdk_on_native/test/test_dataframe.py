@@ -23,6 +23,7 @@ from modin.pandas.test.utils import (
     io_ops_bad_exc,
     default_to_pandas_ignore_string,
     random_state,
+    test_data,
 )
 from .utils import eval_io, ForceHdkImport, set_execution_mode, run_and_compare
 from pandas.core.dtypes.common import is_list_like
@@ -446,10 +447,7 @@ class TestMultiIndex:
         eval_general(pd, pandas, applier)
 
     @pytest.mark.parametrize("is_multiindex", [True, False])
-    @pytest.mark.parametrize(
-        "column_names", [None, ["level1", None], ["level1", "level2"]]
-    )
-    def test_reset_index_multicolumns(self, is_multiindex, column_names):
+    def test_reset_index_multicolumns(self, is_multiindex):
         index = (
             pandas.MultiIndex.from_tuples(
                 [(i, j, k) for i in range(2) for j in range(3) for k in range(4)],
@@ -457,9 +455,6 @@ class TestMultiIndex:
             )
             if is_multiindex
             else pandas.Index(np.arange(1, len(self.data["a"]) + 1), name="index")
-        )
-        columns = pandas.MultiIndex.from_tuples(
-            [("a", "b"), ("b", "c")], names=column_names
         )
         data = np.array(list(self.data.values())).T
 
@@ -470,7 +465,7 @@ class TestMultiIndex:
         run_and_compare(
             fn=applier,
             data=data,
-            constructor_kwargs={"index": index, "columns": columns},
+            constructor_kwargs={"index": index},
         )
 
     def test_set_index_name(self):
@@ -496,6 +491,27 @@ class TestMultiIndex:
         )
 
         df_equals(pandas_df, modin_df)
+
+    def test_rename(self):
+        index = pandas.MultiIndex.from_tuples(
+            [("foo1", "bar1"), ("foo2", "bar2")], names=["foo", "bar"]
+        )
+        columns = pandas.MultiIndex.from_tuples(
+            [("fizz1", "buzz1"), ("fizz2", "buzz2")], names=["fizz", "buzz"]
+        )
+
+        def rename(df, **kwargs):
+            return df.rename(
+                index={"foo1": "foo3", "bar2": "bar3"},
+                columns={"fizz1": "fizz3", "buzz2": "buzz3"},
+            )
+
+        run_and_compare(
+            fn=rename,
+            data=[(0, 0), (1, 1)],
+            constructor_kwargs={"index": index, "columns": columns},
+            force_lazy=False,
+        )
 
 
 class TestFillna:
@@ -2123,6 +2139,43 @@ class TestConstructor:
         df = pd.utils.from_arrow(at)
         assert df._query_compiler._shape_hint == "column"
 
+    def test_constructor_from_modin_series(self):
+        def construct_has_common_projection(lib, df, **kwargs):
+            return lib.DataFrame({"col1": df.iloc[:, 0], "col2": df.iloc[:, 1]})
+
+        def construct_no_common_projection(lib, df1, df2, **kwargs):
+            return lib.DataFrame(
+                {"col1": df1.iloc[:, 0], "col2": df2.iloc[:, 0], "col3": df1.iloc[:, 1]}
+            )
+
+        def construct_mixed_data(lib, df1, df2, **kwargs):
+            return lib.DataFrame(
+                {
+                    "col1": df1.iloc[:, 0],
+                    "col2": df2.iloc[:, 0],
+                    "col3": df1.iloc[:, 1],
+                    "col4": np.arange(len(df1)),
+                }
+            )
+
+        run_and_compare(
+            construct_has_common_projection, data={"a": [1, 2, 3, 4], "b": [3, 4, 5, 6]}
+        )
+        run_and_compare(
+            construct_no_common_projection,
+            data={"a": [1, 2, 3, 4], "b": [3, 4, 5, 6]},
+            data2={"a": [10, 20, 30, 40]},
+            # HDK doesn't support concatenation of frames that has no common projection
+            force_lazy=False,
+        )
+        run_and_compare(
+            construct_mixed_data,
+            data={"a": [1, 2, 3, 4], "b": [3, 4, 5, 6]},
+            data2={"a": [10, 20, 30, 40]},
+            # HDK doesn't support concatenation of frames that has no common projection
+            force_lazy=False,
+        )
+
 
 class TestArrowExecution:
     data1 = {"a": [1, 2, 3], "b": [3, 4, 5], "c": [6, 7, 8]}
@@ -2142,6 +2195,28 @@ class TestArrowExecution:
             data=self.data1,
             data2=self.data2,
             force_arrow_execute=True,
+        )
+
+    def test_drop_row(self):
+        def drop_row(df, **kwargs):
+            return df.drop(labels=1)
+
+        run_and_compare(
+            drop_row,
+            data=self.data1,
+            force_lazy=False,
+        )
+
+    def test_series_pop(self):
+        def pop(df, **kwargs):
+            col = df["a"]
+            col.pop(0)
+            return col
+
+        run_and_compare(
+            pop,
+            data=self.data1,
+            force_lazy=False,
         )
 
     def test_empty_transform(self):
@@ -2245,6 +2320,71 @@ class TestCompare:
             data2=data2,
             constructor_kwargs={"columns": columns},
             force_lazy=False,
+        )
+
+
+class TestDuplicateColumns:
+    def test_init(self):
+        def init(df, **kwargs):
+            return df
+
+        data = [
+            [1, 2, 3, 4],
+            [5, 6, 7, 8],
+            [9, 10, 11, 12],
+            [13, 14, 15, 16],
+            [17, 18, 19, 20],
+        ]
+        columns = ["c1", "c2", "c1", "c3"]
+        run_and_compare(
+            fn=init,
+            data=data,
+            force_lazy=False,
+            constructor_kwargs={"columns": columns},
+        )
+
+    def test_loc(self):
+        def loc(df, **kwargs):
+            return df.loc[:, ["col1", "col3", "col3"]]
+
+        run_and_compare(
+            fn=loc,
+            data=test_data_values[0],
+            force_lazy=False,
+        )
+
+    def test_set_columns(self):
+        def set_cols(df, **kwargs):
+            df.columns = ["col1", "col3", "col3"]
+            return df
+
+        run_and_compare(
+            fn=set_cols,
+            data=[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+            force_lazy=False,
+        )
+
+    def test_set_axis(self):
+        def set_axis(df, **kwargs):
+            sort_index = df.axes[1]
+            labels = [
+                np.nan if i % 2 == 0 else sort_index[i] for i in range(len(sort_index))
+            ]
+            inplace = kwargs["set_axis_inplace"]
+            res = df.set_axis(labels, axis=1, inplace=inplace)
+            return df if inplace else res
+
+        run_and_compare(
+            fn=set_axis,
+            data=test_data["float_nan_data"],
+            force_lazy=False,
+            set_axis_inplace=True,
+        )
+        run_and_compare(
+            fn=set_axis,
+            data=test_data["float_nan_data"],
+            force_lazy=False,
+            set_axis_inplace=False,
         )
 
 

@@ -1217,12 +1217,15 @@ def test_set_axis(data, axis):
     index = modin_df.columns if x else modin_df.index
     labels = ["{0}_{1}".format(index[i], i) for i in range(modin_df.shape[x])]
 
-    modin_result = modin_df.set_axis(labels, axis=axis, inplace=False)
-    pandas_result = pandas_df.set_axis(labels, axis=axis, inplace=False)
-    df_equals(modin_result, pandas_result)
+    kw = {"copy": True}
+    if PandasCompatVersion.CURRENT == PandasCompatVersion.PY36:
+        kw = {"inplace": False}
+    eval_general(modin_df, pandas_df, lambda df: df.set_axis(labels, axis=axis, **kw))
 
     modin_df_copy = modin_df.copy()
-    modin_df.set_axis(labels, axis=axis, inplace=True)
+    if "copy" in kw:
+        kw["copy"] = False
+    modin_df = modin_df.set_axis(labels, axis=axis, **kw)
 
     # Check that the copy and original are different
     try:
@@ -1232,7 +1235,7 @@ def test_set_axis(data, axis):
     else:
         assert False
 
-    pandas_df.set_axis(labels, axis=axis, inplace=True)
+    pandas_df = pandas_df.set_axis(labels, axis=axis, **kw)
     df_equals(modin_df, pandas_df)
 
 
@@ -1475,3 +1478,40 @@ def test___round__():
     data = test_data_values[0]
     with warns_that_defaulting_to_pandas():
         pd.DataFrame(data).__round__()
+
+
+@pytest.mark.parametrize(
+    "get_index",
+    [
+        pytest.param(lambda idx: None, id="None_idx"),
+        pytest.param(lambda idx: ["a", "b", "c"], id="No_intersection_idx"),
+        pytest.param(lambda idx: idx, id="Equal_idx"),
+        pytest.param(lambda idx: idx[::-1], id="Reversed_idx"),
+    ],
+)
+@pytest.mark.parametrize(
+    "get_columns",
+    [
+        pytest.param(lambda idx: None, id="None_idx"),
+        pytest.param(lambda idx: ["a", "b", "c"], id="No_intersection_idx"),
+        pytest.param(lambda idx: idx, id="Equal_idx"),
+        pytest.param(lambda idx: idx[::-1], id="Reversed_idx"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [None, "str"])
+def test_constructor_from_modin_series(get_index, get_columns, dtype):
+    modin_df, pandas_df = create_test_dfs(test_data_values[0])
+
+    modin_data = {f"new_col{i}": modin_df.iloc[:, i] for i in range(modin_df.shape[1])}
+    pandas_data = {
+        f"new_col{i}": pandas_df.iloc[:, i] for i in range(pandas_df.shape[1])
+    }
+
+    index = get_index(modin_df.index)
+    columns = get_columns(list(modin_data.keys()))
+
+    new_modin = pd.DataFrame(modin_data, index=index, columns=columns, dtype=dtype)
+    new_pandas = pandas.DataFrame(
+        pandas_data, index=index, columns=columns, dtype=dtype
+    )
+    df_equals(new_modin, new_pandas)

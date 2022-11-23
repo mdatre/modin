@@ -245,44 +245,63 @@ class BasePandasDataset(BasePandasDatasetCompat):
         TypeError
             If any validation checks fail.
         """
-        # We skip dtype checking if the other is a scalar.
-        if is_scalar(other):
+        if isinstance(other, BasePandasDataset):
+            return other._query_compiler
+        if not is_list_like(other):
+            # We skip dtype checking if the other is a scalar. Note that pandas
+            # is_scalar can be misleading as it is False for almost all objects,
+            # even when those objects should be treated as scalars. See e.g.
+            # https://github.com/modin-project/modin/issues/5236. Therefore, we
+            # detect scalars by checking that `other` is neither a list-like nor
+            # another BasePandasDataset.
             return other
         axis = self._get_axis_number(axis) if axis is not None else 1
         result = other
-        if isinstance(other, BasePandasDataset):
-            return other._query_compiler
-        elif is_list_like(other):
-            if axis == 0:
-                if len(other) != len(self._query_compiler.index):
-                    raise ValueError(
-                        f"Unable to coerce to Series, length must be {len(self._query_compiler.index)}: "
-                        + f"given {len(other)}"
-                    )
-            else:
-                if len(other) != len(self._query_compiler.columns):
-                    raise ValueError(
-                        f"Unable to coerce to Series, length must be {len(self._query_compiler.columns)}: "
-                        + f"given {len(other)}"
-                    )
-            if hasattr(other, "dtype"):
-                other_dtypes = [other.dtype] * len(other)
-            else:
-                other_dtypes = [type(x) for x in other]
-        else:
-            other_dtypes = [
-                type(other)
-                for _ in range(
-                    len(self._query_compiler.index)
-                    if axis
-                    else len(self._query_compiler.columns)
+        if axis == 0:
+            if len(other) != len(self._query_compiler.index):
+                raise ValueError(
+                    f"Unable to coerce to Series, length must be {len(self._query_compiler.index)}: "
+                    + f"given {len(other)}"
                 )
+        else:
+            if len(other) != len(self._query_compiler.columns):
+                raise ValueError(
+                    f"Unable to coerce to Series, length must be {len(self._query_compiler.columns)}: "
+                    + f"given {len(other)}"
+                )
+        if hasattr(other, "dtype"):
+            other_dtypes = [other.dtype] * len(other)
+        elif is_dict_like(other):
+            other_dtypes = [
+                type(other[label])
+                for label in self._query_compiler.get_axis(axis)
+                # The binary operation is applied for intersection of axis labels
+                # and dictionary keys. So filtering out extra keys.
+                if label in other
             ]
+        else:
+            other_dtypes = [type(x) for x in other]
         if compare_index:
             if not self.index.equals(other.index):
                 raise TypeError("Cannot perform operation with non-equal index")
         # Do dtype checking.
         if dtype_check:
+            self_dtypes = self._get_dtypes()
+            if is_dict_like(other):
+                # The binary operation is applied for the intersection of axis labels
+                # and dictionary keys. So filtering `self_dtypes` to match the `other`
+                # dictionary.
+                self_dtypes = [
+                    dtype
+                    for label, dtype in zip(
+                        self._query_compiler.get_axis(axis), self._get_dtypes()
+                    )
+                    if label in other
+                ]
+
+            # TODO(https://github.com/modin-project/modin/issues/5239):
+            # this spuriously rejects other that is a list including some
+            # custom type that can be added to self's elements.
             if not all(
                 (is_numeric_dtype(self_dtype) and is_numeric_dtype(other_dtype))
                 or (is_object_dtype(self_dtype) and is_object_dtype(other_dtype))
@@ -291,7 +310,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
                     and is_datetime_or_timedelta_dtype(other_dtype)
                 )
                 or is_dtype_equal(self_dtype, other_dtype)
-                for self_dtype, other_dtype in zip(self._get_dtypes(), other_dtypes)
+                for self_dtype, other_dtype in zip(self_dtypes, other_dtypes)
             ):
                 raise TypeError("Cannot do operation with improper dtypes")
         return result
@@ -1711,7 +1730,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
         )
 
     @_inherit_docstrings(pandas.DataFrame.mask, apilink="pandas.DataFrame.mask")
-    def _mask(self, *args, **kwargs):
+    def _compat_mask(self, *args, **kwargs):
         return self._default_to_pandas("mask", *args, **kwargs)
 
     @_inherit_docstrings(pandas.DataFrame.max, apilink="pandas.DataFrame.max")
@@ -2206,7 +2225,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
         """
         axis = self._get_axis_number(axis)
         new_labels = self.axes[axis].reorder_levels(order)
-        return self.set_axis(new_labels, axis=axis, inplace=False)
+        return self.set_axis(new_labels, axis=axis)
 
     def _resample(
         self,
@@ -2533,13 +2552,9 @@ class BasePandasDataset(BasePandasDatasetCompat):
                 stacklevel=2,
             )
             labels, axis = axis, labels
-        if inplace:
-            setattr(self, pandas.DataFrame()._get_axis_name(axis), labels)
-        else:
-            if copy:
-                obj = self.copy()
-            obj.set_axis(labels, axis=axis, inplace=True)
-            return obj
+        obj = self.copy() if copy else self
+        setattr(obj, pandas.DataFrame._get_axis_name(axis), labels)
+        return None if inplace else obj
 
     def _shift(self, periods, freq, axis, fill_value):  # noqa: PR01, RT01, D200
         """
@@ -2585,9 +2600,9 @@ class BasePandasDataset(BasePandasDatasetCompat):
         if freq is None:
             if axis == "index" or axis == 0:
                 new_frame = (
-                    filled_df.append(self.iloc[:-periods], ignore_index=True)
+                    pd.concat([filled_df, self.iloc[:-periods]], ignore_index=True)
                     if periods > 0
-                    else self.iloc[-periods:].append(filled_df, ignore_index=True)
+                    else pd.concat([self.iloc[-periods:], filled_df], ignore_index=True)
                 )
                 new_frame.index = self.index.copy()
                 if isinstance(self, DataFrame):
@@ -2745,7 +2760,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
         """
         axis = self._get_axis_number(axis)
         idx = self.index if axis == 0 else self.columns
-        return self.set_axis(idx.swaplevel(i, j), axis=axis, inplace=False)
+        return self.set_axis(idx.swaplevel(i, j), axis=axis)
 
     def tail(self, n=5):  # noqa: PR01, RT01, D200
         """
@@ -2940,7 +2955,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
         """
         axis = self._get_axis_number(axis)
         new_labels = self.axes[axis].shift(periods, freq=freq)
-        return self.set_axis(new_labels, axis=axis, inplace=False)
+        return self.set_axis(new_labels, axis=axis)
 
     def transform(self, func, axis=0, *args, **kwargs):  # noqa: PR01, RT01, D200
         """
@@ -2972,7 +2987,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
         else:
             new_labels = self.axes[axis].tz_convert(tz)
         obj = self.copy() if copy else self
-        return obj.set_axis(new_labels, axis, inplace=not copy)
+        return obj._set_axis(new_labels, axis, inplace=False, copy=copy)
 
     def tz_localize(
         self, tz, axis=0, level=None, copy=True, ambiguous="raise", nonexistent="raise"
@@ -2993,7 +3008,7 @@ class BasePandasDataset(BasePandasDatasetCompat):
             )
             .index
         )
-        return self.set_axis(labels=new_labels, axis=axis, inplace=not copy)
+        return self._set_axis(new_labels, axis, inplace=False, copy=copy)
 
     # TODO: uncomment the following lines when #3331 issue will be closed
     # @prepend_to_notes(

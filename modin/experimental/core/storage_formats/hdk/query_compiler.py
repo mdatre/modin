@@ -510,7 +510,11 @@ class DFAlgQueryCompiler(BaseQueryCompiler):
         if self._modin_frame._has_unsupported_data:
             default_axis_setter(1)(self, columns)
         else:
-            self._modin_frame = self._modin_frame._set_columns(columns)
+            try:
+                self._modin_frame = self._modin_frame._set_columns(columns)
+            except NotImplementedError:
+                default_axis_setter(1)(self, columns)
+                self._modin_frame._has_unsupported_data = True
 
     def fillna(
         self,
@@ -552,7 +556,8 @@ class DFAlgQueryCompiler(BaseQueryCompiler):
         return self.__constructor__(new_modin_frame)
 
     def drop(self, index=None, columns=None):
-        assert index is None, "Only column drop is supported"
+        if index is not None:
+            raise NotImplementedError("Row drop")
         return self.__constructor__(
             self._modin_frame.take_2d_labels_or_positional(
                 row_labels=index, col_labels=self.columns.drop(columns)
