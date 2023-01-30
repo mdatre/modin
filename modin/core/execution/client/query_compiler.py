@@ -213,10 +213,10 @@ class ClientQueryCompiler(BaseQueryCompiler):
             self._service.concat(self._id, axis, other, **kwargs)
         )
 
-    def sort_rows_by_column_values(self, columns, ascending=True, **kwargs):
+    def sort_rows_by_column_values(self, columns, ascending=True, handle_duplicates=None, **kwargs):
         return self.__constructor__(
             self._service.sort_rows_by_column_values(
-                self._id, columns, ascending=ascending, **kwargs
+                self._id, columns, ascending=ascending, handle_duplicates=None, **kwargs
             )
         )
 
@@ -624,7 +624,6 @@ _SINGLE_ID_FORWARDING_METHODS = frozenset(
     {
         "abs",
         "asfreq",
-        "columnarize",
         "transpose",
         "getitem_row_array",
         "getitem_row_labels_array",
@@ -896,6 +895,7 @@ _SINGLE_ID_FORWARDING_METHODS = frozenset(
         "truncate",
         "lookup",
         "wide_to_long",
+        "between_time",
     }
 )
 
@@ -916,6 +916,7 @@ _GROUPBY_FORWARDING_METHODS = frozenset(
         "cummin",
         "cumprod",
         "std",
+        "sem",
         "rank",
         "nunique",
         "median",
