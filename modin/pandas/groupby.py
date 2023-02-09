@@ -16,7 +16,7 @@
 import numpy as np
 import pandas
 import pandas.core.groupby
-from pandas.core.dtypes.common import is_list_like, is_numeric_dtype
+from pandas.core.dtypes.common import is_list_like, is_numeric_dtype, is_integer
 from pandas._libs.lib import no_default
 import pandas.core.common as com
 from types import BuiltinFunctionType
@@ -281,7 +281,28 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
         return result
 
     def nth(self, n, dropna=None):
-        return self._default_to_pandas(lambda df: df.nth(n, dropna=dropna))
+        # TODO: what we really should do is create a GroupByNthSelector to mimic
+        # pandas behavior and then implement some of these methods there.
+        # Adapted error checking from pandas
+        if dropna:
+            if not is_integer(n):
+                raise ValueError("dropna option only supported for an integer argument")
+
+            if dropna not in ["any", "all"]:
+                # Note: when agg-ing picker doesn't raise this, just returns NaN
+                raise ValueError(
+                    "For a DataFrame or Series groupby.nth, dropna must be "
+                    "either None, 'any' or 'all', "
+                    f"(was passed {dropna})."
+                )
+    
+        return self._check_index(
+            self._wrap_aggregation(
+                type(self._query_compiler).groupby_nth,
+                numeric_only=False,
+                agg_kwargs=dict(n=n, dropna=dropna),
+            )
+        )
 
     def cumsum(self, axis=0, *args, **kwargs):
         return self._check_index_name(
@@ -350,7 +371,11 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
         )
 
     def first(self, **kwargs):
-        return self._default_to_pandas(lambda df: df.first(**kwargs))
+        return self._wrap_aggregation(
+            type(self._query_compiler).groupby_first,
+            agg_kwargs=dict(**kwargs),
+            numeric_only=False,
+        )
 
     def backfill(self, limit=None):
         return self.bfill(limit)
@@ -606,7 +631,11 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
     agg = aggregate
 
     def last(self, **kwargs):
-        return self._default_to_pandas(lambda df: df.last(**kwargs))
+        return self._wrap_aggregation(
+            type(self._query_compiler).groupby_last,
+            agg_kwargs=dict(**kwargs),
+            numeric_only=False,
+        )
 
     def mad(self, **kwargs):
         return self._default_to_pandas(lambda df: df.mad(**kwargs))
@@ -756,7 +785,13 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
         )
 
     def head(self, n=5):
-        return self._default_to_pandas(lambda df: df.head(n))
+        return self._check_index(
+            self._wrap_aggregation(
+                type(self._query_compiler).groupby_head, 
+                agg_kwargs=dict(n=n), 
+                numeric_only=False
+            )
+        )
 
     def cumprod(self, axis=0, *args, **kwargs):
         return self._check_index_name(
@@ -824,13 +859,25 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
         return com.pipe(self, func, *args, **kwargs)
 
     def cumcount(self, ascending=True):
-        result = self._default_to_pandas(lambda df: df.cumcount(ascending=ascending))
-        # pandas does not name the index on cumcount
-        result._query_compiler.set_index_name(None)
+        result = self._wrap_aggregation(
+            type(self._query_compiler).groupby_cumcount,
+            numeric_only=False,
+            agg_kwargs=dict(ascending=ascending),
+        )
+        if not isinstance(result, Series):
+            # The result should always be a Series with name None and type int64
+            result = result.squeeze(axis=1)
+            result.name = None
         return result
 
     def tail(self, n=5):
-        return self._default_to_pandas(lambda df: df.tail(n))
+        return self._check_index(
+            self._wrap_aggregation(
+                type(self._query_compiler).groupby_tail, 
+                agg_kwargs=dict(n=n), 
+                numeric_only=False
+            )
+        )
 
     # expanding and rolling are unique cases and need to likely be handled
     # separately. They do not appear to be commonly used.

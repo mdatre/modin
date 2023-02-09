@@ -258,6 +258,21 @@ class ClientQueryCompiler(BaseQueryCompiler):
             )
         )
 
+    def groupby_prod(
+        self,
+        by,
+        axis,
+        groupby_kwargs,
+        agg_args,
+        agg_kwargs,
+        drop=False,
+    ):
+        return self.__constructor__(
+            self._service.groupby_prod(
+                self._id, by._id, axis, groupby_kwargs, agg_args, agg_kwargs, drop
+            )
+        )
+
     def groupby_max(
         self,
         by,
@@ -659,9 +674,11 @@ _SINGLE_ID_FORWARDING_METHODS = frozenset(
         "dt_minute",
         "dt_hour",
         "dt_day",
+        "dt_day_of_week",
         "dt_dayofweek",
         "dt_weekday",
         "dt_day_name",
+        "dt_day_of_year",
         "dt_dayofyear",
         "dt_week",
         "dt_weekofyear",
@@ -911,10 +928,14 @@ _GROUPBY_FORWARDING_METHODS = frozenset(
         "any",
         "size",
         "skew",
+        "cumcount",
         "cumsum",
         "cummax",
         "cummin",
         "cumprod",
+        "head",
+        "tail",
+        "nth",
         "std",
         "sem",
         "rank",
@@ -926,6 +947,8 @@ _GROUPBY_FORWARDING_METHODS = frozenset(
         "shift",
         "prod",
         "var",
+        "first",
+        "last",
     }
 )
 
