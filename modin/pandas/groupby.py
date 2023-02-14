@@ -835,13 +835,15 @@ class DataFrameGroupBy(DataFrameGroupByCompat):
         return self._default_to_pandas(lambda df: df.corr(**kwargs))
 
     def fillna(self, *args, **kwargs):
-        return self._df.__constructor__(
-            query_compiler=self._query_compiler.groupby_fillna(
-                self._by,
-                self._axis,
-                self._kwargs.copy(),
-                args,
-                kwargs,
+        new_groupby_kwargs = self._kwargs.copy()
+        new_groupby_kwargs["as_index"] = True
+        new_groupby_kwargs.update(kwargs)
+        return self._check_index(
+            self._wrap_aggregation(
+                type(self._query_compiler).groupby_fillna,
+                numeric_only=False,
+                agg_args=args,
+                agg_kwargs=new_groupby_kwargs,
             )
         )
 
